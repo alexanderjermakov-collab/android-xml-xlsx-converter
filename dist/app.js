@@ -1,4 +1,4 @@
-/* global JSZip, XLSX */
+/* global JSZip, XLSX, CorrectionEngine */
 "use strict";
 
 const ROUNDTRIP_SHEET = "_RoundTrip";
@@ -20,6 +20,10 @@ const ui = {
   xlsxButton: document.querySelector("#xlsxButton"),
   zipStatus: document.querySelector("#zipStatus"),
   xlsxStatus: document.querySelector("#xlsxStatus"),
+  correctionInput: document.querySelector("#correctionInput"),
+  correctionTemplateButton: document.querySelector("#correctionTemplateButton"),
+  capitalizationRule: document.querySelector("#capitalizationRule"),
+  correctedXlsxButton: document.querySelector("#correctedXlsxButton"),
   languagePanel: document.querySelector("#languagePanel"),
   languageList: document.querySelector("#languageList"),
   languageCount: document.querySelector("#languageCount"),
@@ -54,6 +58,7 @@ function wireFileInput(input, nameNodeId, dropNodeId) {
 wireFileInput(ui.zipInput, "zipName", "zipDrop");
 wireFileInput(ui.xlsxInput, "xlsxName", "xlsxDrop");
 wireFileInput(ui.referenceInput, "referenceName", "referenceDrop");
+wireFileInput(ui.correctionInput, "correctionName", "correctionDrop");
 
 function downloadBytes(bytes, filename, mime) {
   const blob = new Blob([bytes], { type: mime });
@@ -70,6 +75,11 @@ function downloadBytes(bytes, filename, mime) {
 function outputName(inputName, extension) {
   const stem = inputName.replace(/\.[^.]+$/, "");
   return `${stem}_converted.${extension}`;
+}
+
+function namedOutput(inputName, suffix, extension) {
+  const stem = inputName.replace(/\.[^.]+$/, "");
+  return `${stem}_${suffix}.${extension}`;
 }
 
 async function sha256(bytes) {
@@ -365,8 +375,12 @@ function makeRoundTripSheet(filename, signature, zipBytes) {
   ]);
 }
 
+function translationSheetName(workbook) {
+  return workbook.SheetNames.includes(SHEET_NAME) ? SHEET_NAME : workbook.SheetNames[0];
+}
+
 function workbookMatrix(workbook) {
-  const sheetName = workbook.SheetNames.includes(SHEET_NAME) ? SHEET_NAME : workbook.SheetNames[0];
+  const sheetName = translationSheetName(workbook);
   if (!sheetName) throw new Error("The workbook contains no worksheets.");
   const matrix = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1, raw: true, defval: null });
   const header = matrix[0] || [];
@@ -374,6 +388,91 @@ function workbookMatrix(workbook) {
     throw new Error("Expected columns App, string ID, and item ID in the first row.");
   }
   return matrix;
+}
+
+async function correctionRules(file, translationHeaders) {
+  if (!file) return [];
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const workbook = XLSX.read(bytes, { type: "array", cellFormula: false, cellStyles: false });
+  const sheetName = workbook.SheetNames[0];
+  if (!sheetName) throw new Error("The correction workbook contains no worksheets.");
+  const matrix = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1, raw: true, defval: null });
+  return CorrectionEngine.parseRules(matrix, translationHeaders);
+}
+
+async function applyCorrectionOptions(matrix, correctionFile, capitalizationEnabled) {
+  const headers = (matrix[0] || []).slice(3).map(String);
+  const changes = new Map();
+  let replacements = 0;
+  let matchedRules = 0;
+  let unmatchedRules = 0;
+  let capitalized = 0;
+
+  if (correctionFile) {
+    const rules = await correctionRules(correctionFile, headers);
+    const result = CorrectionEngine.applyRules(matrix, rules);
+    replacements = result.replacements;
+    matchedRules = result.matchedRules;
+    unmatchedRules = result.unmatchedRules;
+    result.changes.forEach((change) => changes.set(`${change.row}:${change.column}`, change));
+  }
+  if (capitalizationEnabled) {
+    const result = CorrectionEngine.applyCapitalization(matrix);
+    capitalized = result.capitalized;
+    result.changes.forEach((change) => changes.set(`${change.row}:${change.column}`, change));
+  }
+  return { replacements, matchedRules, unmatchedRules, capitalized, changes: [...changes.values()] };
+}
+
+function writeWorkbookChanges(workbook, changes) {
+  const sheet = workbook.Sheets[translationSheetName(workbook)];
+  for (const change of changes) {
+    const address = XLSX.utils.encode_cell({ r: change.row, c: change.column });
+    const cell = sheet[address] || {};
+    cell.t = "s";
+    cell.v = String(change.value);
+    delete cell.f;
+    delete cell.w;
+    delete cell.h;
+    sheet[address] = cell;
+  }
+}
+
+function correctionSummary(result) {
+  const parts = [];
+  if (result.replacements) parts.push(`${result.replacements.toLocaleString()} text replacements`);
+  if (result.capitalized) parts.push(`${result.capitalized.toLocaleString()} capitalization fixes`);
+  if (result.unmatchedRules) parts.push(`${result.unmatchedRules.toLocaleString()} unmatched correction rules`);
+  return parts.length ? parts.join(", ") : "no cell changes";
+}
+
+function downloadCorrectionTemplate() {
+  const workbook = XLSX.utils.book_new();
+  const corrections = XLSX.utils.aoa_to_sheet([["Language", "Old text", "New text"]]);
+  corrections["!cols"] = [{ wch: 24 }, { wch: 46 }, { wch: 46 }];
+  XLSX.utils.book_append_sheet(workbook, corrections, "Corrections");
+  const instructions = XLSX.utils.aoa_to_sheet([
+    ["Field", "How to use it"],
+    ["Language", "Use values-sk, values-cs; values-sk; values-cs for several languages; or all."],
+    ["Old text", "The complete current cell text. Matching is exact."],
+    ["New text", "The complete replacement text."],
+  ]);
+  instructions["!cols"] = [{ wch: 18 }, { wch: 88 }];
+  XLSX.utils.book_append_sheet(workbook, instructions, "Instructions");
+  const bytes = new Uint8Array(XLSX.write(workbook, { bookType: "xlsx", type: "array", compression: true }));
+  downloadBytes(bytes, "language_correction_template.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+}
+
+async function createCorrectedWorkbook(xlsxFile, correctionFile, capitalizationEnabled) {
+  if (!correctionFile && !capitalizationEnabled) throw new Error("Choose a correction workbook or enable the capitalization rule.");
+  const xlsxBytes = new Uint8Array(await xlsxFile.arrayBuffer());
+  const workbook = XLSX.read(xlsxBytes, { type: "array", cellFormula: false, cellStyles: true });
+  const matrix = workbookMatrix(workbook);
+  const result = await applyCorrectionOptions(matrix, correctionFile, capitalizationEnabled);
+  writeWorkbookChanges(workbook, result.changes);
+  const output = new Uint8Array(XLSX.write(workbook, { bookType: "xlsx", type: "array", compression: true }));
+  downloadBytes(output, namedOutput(xlsxFile.name, "corrected", "xlsx"), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  return { message: `Corrected XLSX created: ${correctionSummary(result)}.`, result };
 }
 
 function readRoundTrip(workbook) {
@@ -599,11 +698,12 @@ async function rebuildArchive(templateBytes, matrix, onProgress) {
   };
 }
 
-async function createArchive(xlsxFile, referenceFile) {
+async function createArchive(xlsxFile, referenceFile, correctionFile, capitalizationEnabled) {
   const xlsxBytes = new Uint8Array(await xlsxFile.arrayBuffer());
   const workbook = XLSX.read(xlsxBytes, { type: "array", cellFormula: false, cellStyles: false });
   const matrix = workbookMatrix(workbook);
   const metadata = readRoundTrip(workbook);
+  const corrections = await applyCorrectionOptions(matrix, correctionFile, capitalizationEnabled);
 
   let templateBytes;
   if (metadata) templateBytes = metadata.zipBytes;
@@ -614,7 +714,7 @@ async function createArchive(xlsxFile, referenceFile) {
   const filename = outputName(xlsxFile.name, "zip");
   downloadBytes(rebuilt.output, filename, "application/zip");
   return {
-    message: `ZIP created: ${rebuilt.processedRows.toLocaleString()} rows, ${rebuilt.languageCount.toLocaleString()} languages, ${rebuilt.rewrittenDocuments.toLocaleString()} XML files (${rebuilt.changes.toLocaleString()} changed values).`,
+    message: `ZIP created: ${rebuilt.processedRows.toLocaleString()} rows, ${rebuilt.languageCount.toLocaleString()} languages, ${rebuilt.rewrittenDocuments.toLocaleString()} XML files. Corrections: ${correctionSummary(corrections)}.`,
     exact: false,
   };
 }
@@ -648,12 +748,45 @@ ui.xlsxButton.addEventListener("click", async () => {
   setBusy(ui.xlsxButton, true);
   showStatus(ui.xlsxStatus, "Opening workbook…");
   try {
-    const result = await createArchive(file, ui.referenceInput.files[0] || null);
+    const result = await createArchive(
+      file,
+      ui.referenceInput.files[0] || null,
+      ui.correctionInput.files[0] || null,
+      ui.capitalizationRule.checked,
+    );
     showStatus(ui.xlsxStatus, result.message, "success");
   } catch (error) {
     console.error(error);
     showStatus(ui.xlsxStatus, error.message || String(error), "error");
   } finally {
     setBusy(ui.xlsxButton, false);
+  }
+});
+
+ui.correctionTemplateButton.addEventListener("click", () => {
+  downloadCorrectionTemplate();
+  showStatus(ui.xlsxStatus, "Correction template downloaded.", "success");
+});
+
+ui.correctedXlsxButton.addEventListener("click", async () => {
+  const file = ui.xlsxInput.files[0];
+  if (!file) {
+    showStatus(ui.xlsxStatus, "Choose an XLSX workbook first.", "error");
+    return;
+  }
+  setBusy(ui.correctedXlsxButton, true);
+  showStatus(ui.xlsxStatus, "Applying workbook corrections…");
+  try {
+    const result = await createCorrectedWorkbook(
+      file,
+      ui.correctionInput.files[0] || null,
+      ui.capitalizationRule.checked,
+    );
+    showStatus(ui.xlsxStatus, result.message, "success");
+  } catch (error) {
+    console.error(error);
+    showStatus(ui.xlsxStatus, error.message || String(error), "error");
+  } finally {
+    setBusy(ui.correctedXlsxButton, false);
   }
 });

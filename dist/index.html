@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="styles.css">
   <script defer src="assets/jszip.min.js"></script>
   <script defer src="assets/xlsx.full.min.js"></script>
+  <script defer src="corrections.js"></script>
   <script defer src="app.js"></script>
 </head>
 <body>
@@ -65,6 +66,26 @@
             <span class="filename" id="referenceName"></span>
           </label>
         </details>
+        <section class="correction-panel" aria-label="Optional workbook corrections">
+          <div class="correction-heading">
+            <div>
+              <strong>Optional XLSX corrections</strong>
+              <span>Apply before downloading a corrected workbook or rebuilding the ZIP.</span>
+            </div>
+            <button class="text-button" id="correctionTemplateButton" type="button">Download template</button>
+          </div>
+          <label class="drop compact-drop" id="correctionDrop">
+            <input id="correctionInput" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet">
+            <span><strong>Correction workbook</strong>Columns: <code>Language</code>, <code>Old text</code>, <code>New text</code></span>
+            <span class="filename" id="correctionName"></span>
+          </label>
+          <div class="correction-help"><code>Language</code> accepts one folder, several separated by commas or semicolons, or <code>all</code>.</div>
+          <label class="check-option">
+            <input id="capitalizationRule" type="checkbox">
+            <span><strong>Apply English capitalization rule</strong>If the English text starts with a capital letter, capitalize the first letter of every available translation.</span>
+          </label>
+          <button class="secondary-button" id="correctedXlsxButton" type="button">Download corrected XLSX</button>
+        </section>
         <button id="xlsxButton" type="button">Rebuild translation ZIP</button>
         <div class="status" id="xlsxStatus" role="status" aria-live="polite"></div>
       </article>
@@ -74,6 +95,7 @@
       <div class="note"><strong>Reference-compatible workbook</strong><span>One visible sheet with <code>App</code>, <code>string ID</code>, <code>item ID</code>, and the reference <code>values*</code> columns.</span></div>
       <div class="note"><strong>Full reverse conversion</strong><span>Every run reads the workbook and rebuilds all translation XML files, even when no cell values changed.</span></div>
       <div class="note"><strong>Safe legacy conversion</strong><span>For an existing consolidated workbook, add its source ZIP so non-translation files and the directory tree are preserved.</span></div>
+      <div class="note"><strong>Controlled corrections</strong><span>Apply exact text replacements by language and optionally align translation capitalization with English before export.</span></div>
     </section>
   </main>
 
