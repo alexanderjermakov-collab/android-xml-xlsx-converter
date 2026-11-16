@@ -29,6 +29,21 @@
           <span><strong>Choose or drop a ZIP archive</strong>Android resource archive with <code>values*</code> folders</span>
           <span class="filename" id="zipName"></span>
         </label>
+        <section class="language-panel" id="languagePanel" hidden aria-label="Language selection">
+          <div class="language-heading">
+            <div>
+              <strong>Select languages</strong>
+              <span id="languageCount">Scanning archive…</span>
+            </div>
+            <div class="language-actions">
+              <button class="text-button" id="selectAllLanguages" type="button">All</button>
+              <button class="text-button" id="clearLanguages" type="button">Clear</button>
+            </div>
+          </div>
+          <input class="language-search" id="languageSearch" type="search" placeholder="Find a language or values folder…" autocomplete="off">
+          <div class="language-list" id="languageList"></div>
+          <div class="language-help">The base <code>values</code> column is always included.</div>
+        </section>
         <button id="zipButton" type="button">Create consolidated XLSX</button>
         <div class="status" id="zipStatus" role="status" aria-live="polite"></div>
       </article>

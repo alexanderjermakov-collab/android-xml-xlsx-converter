@@ -20,7 +20,15 @@ const ui = {
   xlsxButton: document.querySelector("#xlsxButton"),
   zipStatus: document.querySelector("#zipStatus"),
   xlsxStatus: document.querySelector("#xlsxStatus"),
+  languagePanel: document.querySelector("#languagePanel"),
+  languageList: document.querySelector("#languageList"),
+  languageCount: document.querySelector("#languageCount"),
+  languageSearch: document.querySelector("#languageSearch"),
+  selectAllLanguages: document.querySelector("#selectAllLanguages"),
+  clearLanguages: document.querySelector("#clearLanguages"),
 };
+
+let languageState = { fileToken: "", columns: [], ready: false };
 
 function showStatus(node, message, kind = "working") {
   node.textContent = message;
@@ -117,9 +125,15 @@ function openCache() {
   });
 }
 
-async function cacheWorkbook(zipBytes, workbookBytes, filename) {
+async function roundTripCacheKey(zipBytes, profile) {
+  const zipHash = await sha256(zipBytes);
+  const profileHash = await sha256(textEncoder.encode(profile.join("\u001f")));
+  return `${zipHash}:${profileHash}`;
+}
+
+async function cacheWorkbook(zipBytes, workbookBytes, filename, profile) {
   try {
-    const zipHash = await sha256(zipBytes);
+    const zipHash = await roundTripCacheKey(zipBytes, profile);
     const database = await openCache();
     await new Promise((resolve, reject) => {
       const transaction = database.transaction("workbooks", "readwrite");
@@ -133,9 +147,9 @@ async function cacheWorkbook(zipBytes, workbookBytes, filename) {
   }
 }
 
-async function cachedWorkbook(zipBytes) {
+async function cachedWorkbook(zipBytes, profile) {
   try {
-    const zipHash = await sha256(zipBytes);
+    const zipHash = await roundTripCacheKey(zipBytes, profile);
     const database = await openCache();
     const result = await new Promise((resolve, reject) => {
       const request = database.transaction("workbooks", "readonly").objectStore("workbooks").get(zipHash);
@@ -165,6 +179,113 @@ function parseResourcePath(path) {
   return { app: match[1], valuesDir: match[2], filename: match[3], ...directory };
 }
 
+function fileToken(file) {
+  return file ? `${file.name}:${file.size}:${file.lastModified}` : "";
+}
+
+function updateLanguageCount() {
+  const options = Array.from(ui.languageList.querySelectorAll('input[type="checkbox"]:not(:disabled)'));
+  const selected = options.filter((option) => option.checked).length;
+  ui.languageCount.textContent = `${selected} of ${options.length} languages selected`;
+}
+
+function renderLanguages(columns) {
+  ui.languageList.replaceChildren();
+  const baseLabel = document.createElement("label");
+  baseLabel.className = "language-option base";
+  const baseCheckbox = document.createElement("input");
+  baseCheckbox.type = "checkbox";
+  baseCheckbox.checked = true;
+  baseCheckbox.disabled = true;
+  const baseText = document.createElement("span");
+  baseText.textContent = "values — base/source language (always included)";
+  baseLabel.append(baseCheckbox, baseText);
+  ui.languageList.append(baseLabel);
+
+  for (const column of columns.filter((value) => value !== "values")) {
+    const label = document.createElement("label");
+    label.className = "language-option";
+    label.dataset.search = column.toLocaleLowerCase();
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.value = column;
+    checkbox.checked = true;
+    checkbox.addEventListener("change", updateLanguageCount);
+    const text = document.createElement("span");
+    text.textContent = column;
+    label.append(checkbox, text);
+    ui.languageList.append(label);
+  }
+  ui.languagePanel.hidden = false;
+  ui.languageSearch.value = "";
+  updateLanguageCount();
+}
+
+async function scanArchiveLanguages(file) {
+  const token = fileToken(file);
+  languageState = { fileToken: token, columns: [], ready: false };
+  ui.languagePanel.hidden = false;
+  ui.languageList.replaceChildren();
+  ui.languageCount.textContent = "Scanning archive…";
+  const zip = await JSZip.loadAsync(new Uint8Array(await file.arrayBuffer()));
+  const found = new Set();
+  for (const entry of Object.values(zip.files)) {
+    if (entry.dir) continue;
+    const info = parseResourcePath(entry.name);
+    if (info) found.add(info.column);
+  }
+  const schema = await schemaPromise;
+  const ordered = schema.headers.filter((header) => found.has(header));
+  for (const column of found) if (!ordered.includes(column)) ordered.push(column);
+  languageState = { fileToken: token, columns: ordered, ready: true };
+  renderLanguages(ordered);
+}
+
+function selectedLanguageColumns() {
+  const selected = new Set(["values"]);
+  for (const checkbox of ui.languageList.querySelectorAll('input[type="checkbox"]:checked:not(:disabled)')) {
+    selected.add(checkbox.value);
+  }
+  return selected;
+}
+
+ui.zipInput.addEventListener("change", async () => {
+  const file = ui.zipInput.files[0];
+  if (!file) {
+    ui.languagePanel.hidden = true;
+    languageState = { fileToken: "", columns: [], ready: false };
+    return;
+  }
+  ui.zipButton.disabled = true;
+  showStatus(ui.zipStatus, "Scanning available languages…");
+  try {
+    await scanArchiveLanguages(file);
+    showStatus(ui.zipStatus, `Found ${Math.max(0, languageState.columns.length - 1)} selectable languages.`, "success");
+  } catch (error) {
+    languageState = { fileToken: fileToken(file), columns: [], ready: false };
+    showStatus(ui.zipStatus, error.message || String(error), "error");
+  } finally {
+    ui.zipButton.disabled = false;
+  }
+});
+
+ui.selectAllLanguages.addEventListener("click", () => {
+  ui.languageList.querySelectorAll('input[type="checkbox"]:not(:disabled)').forEach((checkbox) => { checkbox.checked = true; });
+  updateLanguageCount();
+});
+
+ui.clearLanguages.addEventListener("click", () => {
+  ui.languageList.querySelectorAll('input[type="checkbox"]:not(:disabled)').forEach((checkbox) => { checkbox.checked = false; });
+  updateLanguageCount();
+});
+
+ui.languageSearch.addEventListener("input", () => {
+  const query = ui.languageSearch.value.trim().toLocaleLowerCase();
+  ui.languageList.querySelectorAll(".language-option:not(.base)").forEach((option) => {
+    option.classList.toggle("filtered", Boolean(query) && !option.dataset.search.includes(query));
+  });
+});
+
 function xmlDocument(text, path) {
   const documentNode = new DOMParser().parseFromString(text, "application/xml");
   const error = documentNode.querySelector("parsererror");
@@ -180,9 +301,13 @@ function groupKey(app, id, variant) {
   return `${app}\u001f${id}\u001f${variant || ""}`;
 }
 
-async function extractArchive(zipBytes, onProgress) {
+async function extractArchive(zipBytes, selectedColumns, onProgress) {
   const zip = await JSZip.loadAsync(zipBytes);
-  const entries = Object.values(zip.files).filter((entry) => !entry.dir && parseResourcePath(entry.name));
+  const entries = Object.values(zip.files).filter((entry) => {
+    if (entry.dir) return false;
+    const info = parseResourcePath(entry.name);
+    return info && selectedColumns.has(info.column);
+  });
   const groups = new Map();
   const discoveredColumns = [];
   const columnSet = new Set();
@@ -315,18 +440,21 @@ function readRoundTrip(workbook) {
   };
 }
 
-async function createWorkbook(zipFile) {
+async function createWorkbook(zipFile, selectedColumns) {
   const zipBytes = new Uint8Array(await zipFile.arrayBuffer());
-  const cached = await cachedWorkbook(zipBytes);
+  const schema = await schemaPromise;
+  const headers = schema.headers.filter((header) => selectedColumns.has(header));
+  for (const column of languageState.columns) {
+    if (selectedColumns.has(column) && !headers.includes(column)) headers.push(column);
+  }
+  const cached = await cachedWorkbook(zipBytes, headers);
   if (cached) {
     downloadBytes(cached.bytes, cached.filename, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
     return { message: "Restored the exact source XLSX from this browser’s round-trip cache.", exact: true };
   }
 
-  const schema = await schemaPromise;
-  const extracted = await extractArchive(zipBytes, (message) => showStatus(ui.zipStatus, message));
+  const extracted = await extractArchive(zipBytes, selectedColumns, (message) => showStatus(ui.zipStatus, message));
   const rows = orderRows(flattenGroups(extracted.groups), schema);
-  const headers = [...schema.headers];
   const headerSet = new Set(headers);
   for (const column of extracted.discoveredColumns) {
     if (!headerSet.has(column)) {
@@ -347,7 +475,7 @@ async function createWorkbook(zipFile) {
   workbook.Workbook = { Sheets: [{ name: SHEET_NAME, Hidden: 0 }, { name: ROUNDTRIP_SHEET, Hidden: 2 }] };
   const workbookBytes = new Uint8Array(XLSX.write(workbook, { bookType: "xlsx", type: "array", compression: true }));
   const filename = outputName(zipFile.name, "xlsx");
-  await cacheWorkbook(zipBytes, workbookBytes, filename);
+  await cacheWorkbook(zipBytes, workbookBytes, filename, headers);
   downloadBytes(workbookBytes, filename, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
   return { message: `Created ${rows.toLocaleString()} rows and ${headers.length.toLocaleString()} translation columns.`, exact: false };
 }
@@ -519,9 +647,10 @@ async function createArchive(xlsxFile, referenceFile) {
   const matrix = workbookMatrix(workbook);
   const metadata = readRoundTrip(workbook);
   const currentSignature = await matrixSignature(matrix);
+  const profile = (matrix[0] || []).slice(3).map(String);
 
   if (metadata && metadata.signature === currentSignature) {
-    await cacheWorkbook(metadata.zipBytes, xlsxBytes, xlsxFile.name);
+    await cacheWorkbook(metadata.zipBytes, xlsxBytes, xlsxFile.name, profile);
     downloadBytes(metadata.zipBytes, metadata.sourceName, "application/zip");
     return { message: "The sheet is unchanged. Returned the original ZIP byte-for-byte.", exact: true };
   }
@@ -533,7 +662,7 @@ async function createArchive(xlsxFile, referenceFile) {
 
   const rebuilt = await rebuildArchive(templateBytes, matrix, (message) => showStatus(ui.xlsxStatus, message));
   const filename = outputName(xlsxFile.name, "zip");
-  await cacheWorkbook(rebuilt.output, xlsxBytes, xlsxFile.name);
+  await cacheWorkbook(rebuilt.output, xlsxBytes, xlsxFile.name, profile);
   downloadBytes(rebuilt.output, filename, "application/zip");
   return { message: `Rebuilt the archive with ${rebuilt.changes.toLocaleString()} XML value changes.`, exact: false };
 }
@@ -547,7 +676,8 @@ ui.zipButton.addEventListener("click", async () => {
   setBusy(ui.zipButton, true);
   showStatus(ui.zipStatus, "Opening archive…");
   try {
-    const result = await createWorkbook(file);
+    if (!languageState.ready || languageState.fileToken !== fileToken(file)) await scanArchiveLanguages(file);
+    const result = await createWorkbook(file, selectedLanguageColumns());
     showStatus(ui.zipStatus, result.message, "success");
   } catch (error) {
     console.error(error);
