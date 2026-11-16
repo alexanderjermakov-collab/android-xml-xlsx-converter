@@ -1,4 +1,4 @@
-# Android XML ↔ XLSX Converter
+# Google TV Language files XML-XLS-XML Converter
 
 Fully client-side HTML converter for Android translation archives.
 
