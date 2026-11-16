@@ -72,7 +72,7 @@
 
     <section class="notes" aria-label="Format notes">
       <div class="note"><strong>Reference-compatible workbook</strong><span>One visible sheet with <code>App</code>, <code>string ID</code>, <code>item ID</code>, and the reference <code>values*</code> columns.</span></div>
-      <div class="note"><strong>Exact no-change ZIP round trip</strong><span>If the generated translation sheet is unchanged, the original ZIP bytes are returned exactly.</span></div>
+      <div class="note"><strong>Full reverse conversion</strong><span>Every run reads the workbook and rebuilds all translation XML files, even when no cell values changed.</span></div>
       <div class="note"><strong>Safe legacy conversion</strong><span>For an existing consolidated workbook, add its source ZIP so non-translation files and the directory tree are preserved.</span></div>
     </section>
   </main>

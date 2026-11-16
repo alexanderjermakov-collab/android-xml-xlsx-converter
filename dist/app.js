@@ -116,54 +116,6 @@ async function matrixSignature(matrix) {
   return sha256(textEncoder.encode(parts.join("")));
 }
 
-function openCache() {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open("android-xml-xlsx-converter", 1);
-    request.onupgradeneeded = () => request.result.createObjectStore("workbooks", { keyPath: "zipHash" });
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-}
-
-async function roundTripCacheKey(zipBytes, profile) {
-  const zipHash = await sha256(zipBytes);
-  const profileHash = await sha256(textEncoder.encode(profile.join("\u001f")));
-  return `${zipHash}:${profileHash}`;
-}
-
-async function cacheWorkbook(zipBytes, workbookBytes, filename, profile) {
-  try {
-    const zipHash = await roundTripCacheKey(zipBytes, profile);
-    const database = await openCache();
-    await new Promise((resolve, reject) => {
-      const transaction = database.transaction("workbooks", "readwrite");
-      transaction.objectStore("workbooks").put({ zipHash, filename, bytes: workbookBytes });
-      transaction.oncomplete = resolve;
-      transaction.onerror = () => reject(transaction.error);
-    });
-    database.close();
-  } catch (error) {
-    console.warn("Workbook round-trip cache unavailable:", error);
-  }
-}
-
-async function cachedWorkbook(zipBytes, profile) {
-  try {
-    const zipHash = await roundTripCacheKey(zipBytes, profile);
-    const database = await openCache();
-    const result = await new Promise((resolve, reject) => {
-      const request = database.transaction("workbooks", "readonly").objectStore("workbooks").get(zipHash);
-      request.onsuccess = () => resolve(request.result || null);
-      request.onerror = () => reject(request.error);
-    });
-    database.close();
-    return result;
-  } catch (error) {
-    console.warn("Workbook round-trip cache unavailable:", error);
-    return null;
-  }
-}
-
 function splitValuesDirectory(valuesDir) {
   const variant = valuesDir.endsWith("-v23") ? "-v23" : null;
   const column = variant ? valuesDir.slice(0, -4) : valuesDir;
@@ -351,7 +303,7 @@ async function extractArchive(zipBytes, selectedColumns, onProgress) {
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
   }
-  return { groups, discoveredColumns };
+  return { groups, discoveredColumns, processedFiles: entries.length };
 }
 
 function flattenGroups(groups) {
@@ -447,12 +399,6 @@ async function createWorkbook(zipFile, selectedColumns) {
   for (const column of languageState.columns) {
     if (selectedColumns.has(column) && !headers.includes(column)) headers.push(column);
   }
-  const cached = await cachedWorkbook(zipBytes, headers);
-  if (cached) {
-    downloadBytes(cached.bytes, cached.filename, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-    return { message: "Restored the exact source XLSX from this browser’s round-trip cache.", exact: true };
-  }
-
   const extracted = await extractArchive(zipBytes, selectedColumns, (message) => showStatus(ui.zipStatus, message));
   const rows = orderRows(flattenGroups(extracted.groups), schema);
   const headerSet = new Set(headers);
@@ -475,9 +421,12 @@ async function createWorkbook(zipFile, selectedColumns) {
   workbook.Workbook = { Sheets: [{ name: SHEET_NAME, Hidden: 0 }, { name: ROUNDTRIP_SHEET, Hidden: 2 }] };
   const workbookBytes = new Uint8Array(XLSX.write(workbook, { bookType: "xlsx", type: "array", compression: true }));
   const filename = outputName(zipFile.name, "xlsx");
-  await cacheWorkbook(zipBytes, workbookBytes, filename, headers);
   downloadBytes(workbookBytes, filename, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-  return { message: `Created ${rows.toLocaleString()} rows and ${headers.length.toLocaleString()} translation columns.`, exact: false };
+  const languageCount = headers.filter((header) => header !== "values").length;
+  return {
+    message: `XLSX created: ${rows.length.toLocaleString()} rows, ${languageCount.toLocaleString()} languages, ${extracted.processedFiles.toLocaleString()} XML files.`,
+    exact: false,
+  };
 }
 
 function workbookData(matrix) {
@@ -553,10 +502,11 @@ async function rebuildArchive(templateBytes, matrix, onProgress) {
           const record = workbook.records.get(key);
           const column = columnIndex.get(info.column);
           const value = record && column !== undefined ? record.row[column] : null;
-          if (nonBlank(value) && String(value) !== item.textContent) {
-            item.textContent = String(value);
+          if (nonBlank(value)) {
+            const workbookValue = String(value);
+            if (workbookValue !== item.textContent) changes += 1;
+            item.textContent = workbookValue;
             state.changed = true;
-            changes += 1;
           }
         });
       } else if (
@@ -571,10 +521,11 @@ async function rebuildArchive(templateBytes, matrix, onProgress) {
         const record = workbook.records.get(key);
         const column = columnIndex.get(info.column);
         const value = record && column !== undefined ? record.row[column] : null;
-        if (nonBlank(value) && String(value) !== element.textContent) {
-          element.textContent = String(value);
+        if (nonBlank(value)) {
+          const workbookValue = String(value);
+          if (workbookValue !== element.textContent) changes += 1;
+          element.textContent = workbookValue;
           state.changed = true;
-          changes += 1;
         }
       }
     }
@@ -628,17 +579,24 @@ async function rebuildArchive(templateBytes, matrix, onProgress) {
   }
 
   const serializer = new XMLSerializer();
+  let rewrittenDocuments = 0;
   for (const [path, state] of documents) {
-    if (!state.changed) continue;
     let xml = serializer.serializeToString(state.documentNode);
     if (!xml.startsWith("<?xml")) xml = `<?xml version="1.0" encoding="utf-8"?>\n${xml}`;
     zip.file(path, xml);
+    rewrittenDocuments += 1;
   }
   const output = await zip.generateAsync(
     { type: "uint8array", compression: "DEFLATE", compressionOptions: { level: 6 } },
     (metadata) => onProgress?.(`Writing ZIP… ${Math.round(metadata.percent)}%`),
   );
-  return { output, changes };
+  return {
+    output,
+    changes,
+    rewrittenDocuments,
+    processedRows: workbook.records.size,
+    languageCount: workbook.headers.filter((header) => header !== "values").length,
+  };
 }
 
 async function createArchive(xlsxFile, referenceFile) {
@@ -646,14 +604,6 @@ async function createArchive(xlsxFile, referenceFile) {
   const workbook = XLSX.read(xlsxBytes, { type: "array", cellFormula: false, cellStyles: false });
   const matrix = workbookMatrix(workbook);
   const metadata = readRoundTrip(workbook);
-  const currentSignature = await matrixSignature(matrix);
-  const profile = (matrix[0] || []).slice(3).map(String);
-
-  if (metadata && metadata.signature === currentSignature) {
-    await cacheWorkbook(metadata.zipBytes, xlsxBytes, xlsxFile.name, profile);
-    downloadBytes(metadata.zipBytes, metadata.sourceName, "application/zip");
-    return { message: "The sheet is unchanged. Returned the original ZIP byte-for-byte.", exact: true };
-  }
 
   let templateBytes;
   if (metadata) templateBytes = metadata.zipBytes;
@@ -662,9 +612,11 @@ async function createArchive(xlsxFile, referenceFile) {
 
   const rebuilt = await rebuildArchive(templateBytes, matrix, (message) => showStatus(ui.xlsxStatus, message));
   const filename = outputName(xlsxFile.name, "zip");
-  await cacheWorkbook(rebuilt.output, xlsxBytes, xlsxFile.name, profile);
   downloadBytes(rebuilt.output, filename, "application/zip");
-  return { message: `Rebuilt the archive with ${rebuilt.changes.toLocaleString()} XML value changes.`, exact: false };
+  return {
+    message: `ZIP created: ${rebuilt.processedRows.toLocaleString()} rows, ${rebuilt.languageCount.toLocaleString()} languages, ${rebuilt.rewrittenDocuments.toLocaleString()} XML files (${rebuilt.changes.toLocaleString()} changed values).`,
+    exact: false,
+  };
 }
 
 ui.zipButton.addEventListener("click", async () => {
