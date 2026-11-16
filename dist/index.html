@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Convert Android translation ZIP archives to consolidated XLSX workbooks and back, entirely in your browser.">
+  <title>Android XML ↔ XLSX Converter</title>
+  <link rel="stylesheet" href="styles.css">
+  <script defer src="assets/jszip.min.js"></script>
+  <script defer src="assets/xlsx.full.min.js"></script>
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <header class="shell">
+    <div class="eyebrow">Translation utility</div>
+    <h1>Android XML<br>meets Excel.</h1>
+    <p class="lede">Consolidate Android <code>values*</code> resources into the established XLSX translation table, then rebuild the original ZIP hierarchy after review.</p>
+    <div class="privacy"><span class="dot"></span>Files stay on this device. Nothing is uploaded.</div>
+  </header>
+
+  <main class="shell">
+    <section class="grid" aria-label="Converters">
+      <article class="card">
+        <div class="step">01</div>
+        <h2>ZIP → XLSX</h2>
+        <p>Read translation XML files from the archive and create one consolidated <code>All translations</code> sheet.</p>
+        <label class="drop" id="zipDrop">
+          <input id="zipInput" type="file" accept=".zip,application/zip">
+          <span><strong>Choose or drop a ZIP archive</strong>Android resource archive with <code>values*</code> folders</span>
+          <span class="filename" id="zipName"></span>
+        </label>
+        <button id="zipButton" type="button">Create consolidated XLSX</button>
+        <div class="status" id="zipStatus" role="status" aria-live="polite"></div>
+      </article>
+
+      <article class="card">
+        <div class="step">02</div>
+        <h2>XLSX → ZIP</h2>
+        <p>Apply the consolidated translations to their XML resources while keeping the archive’s paths and other files intact.</p>
+        <label class="drop" id="xlsxDrop">
+          <input id="xlsxInput" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet">
+          <span><strong>Choose or drop an XLSX workbook</strong>Expected sheet: <code>All translations</code></span>
+          <span class="filename" id="xlsxName"></span>
+        </label>
+        <details class="reference">
+          <summary>Reference ZIP for a legacy workbook</summary>
+          <label class="drop" id="referenceDrop">
+            <input id="referenceInput" type="file" accept=".zip,application/zip">
+            <span><strong>Choose the source ZIP</strong>Needed only when the XLSX was not created by this converter</span>
+            <span class="filename" id="referenceName"></span>
+          </label>
+        </details>
+        <button id="xlsxButton" type="button">Rebuild translation ZIP</button>
+        <div class="status" id="xlsxStatus" role="status" aria-live="polite"></div>
+      </article>
+    </section>
+
+    <section class="notes" aria-label="Format notes">
+      <div class="note"><strong>Reference-compatible workbook</strong><span>One visible sheet with <code>App</code>, <code>string ID</code>, <code>item ID</code>, and the reference <code>values*</code> columns.</span></div>
+      <div class="note"><strong>Exact no-change ZIP round trip</strong><span>If the generated translation sheet is unchanged, the original ZIP bytes are returned exactly.</span></div>
+      <div class="note"><strong>Safe legacy conversion</strong><span>For an existing consolidated workbook, add its source ZIP so non-translation files and the directory tree are preserved.</span></div>
+    </section>
+  </main>
+
+  <footer class="shell">Open-source browser utility. XLSX support is provided by SheetJS; archive handling by JSZip.</footer>
+</body>
+</html>
