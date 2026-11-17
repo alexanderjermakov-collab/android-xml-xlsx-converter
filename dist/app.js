@@ -604,7 +604,7 @@ function perLanguageStatistics(sourceArchive, outputArchive, modifications) {
     if (!stats.has(language)) stats.set(language, {
       language, total: 0, matched: 0, changed: 0, onlySource: 0, onlyOutput: 0,
       correctionTargets: 0, correctionChecks: 0, verified: 0, mismatched: 0,
-      missing: 0, unmatched: 0, conflicts: 0, capitalization: 0,
+      missing: 0, unmatched: 0, conflicts: 0, capitalization: 0, normalized: 0,
     });
     return stats.get(language);
   };
@@ -626,6 +626,7 @@ function perLanguageStatistics(sourceArchive, outputArchive, modifications) {
       if (!evaluation.checks.every((check) => check.targetMissing)) row.correctionTargets += 1;
       row.correctionChecks += evaluation.checks.length;
       row.verified += evaluation.results.filter((check) => check.status.startsWith("MATCH")).length;
+      row.normalized += evaluation.results.filter((check) => check.status === "MATCH (XML line endings normalized)").length;
       row.mismatched += evaluation.results.filter((check) => check.status === "MISMATCH").length;
       row.missing += evaluation.results.filter((check) => check.status === "MISSING OUTPUT").length;
       row.unmatched += evaluation.results.filter((check) => check.status === "TARGET NOT FOUND").length;
@@ -636,61 +637,209 @@ function perLanguageStatistics(sourceArchive, outputArchive, modifications) {
   return [...stats.values()].sort((left, right) => left.language.localeCompare(right.language));
 }
 
+const REPORT_COLORS = {
+  navy: "1F4E78",
+  blue: "D9EAF7",
+  green: "C6EFCE",
+  greenText: "006100",
+  yellow: "FFEB9C",
+  yellowText: "9C6500",
+  red: "FFC7CE",
+  redText: "9C0006",
+  white: "FFFFFF",
+  border: "A6A6A6",
+};
+
+function reportHeaderStyle() {
+  return {
+    font: { name: "Arial", sz: 10, bold: true, color: { rgb: REPORT_COLORS.white } },
+    fill: { patternType: "solid", fgColor: { rgb: REPORT_COLORS.navy } },
+    alignment: { horizontal: "center", vertical: "center", wrapText: true },
+    border: { bottom: { style: "thin", color: { rgb: REPORT_COLORS.border } } },
+  };
+}
+
+function reportTitleStyle() {
+  return {
+    font: { name: "Arial", sz: 14, bold: true, color: { rgb: REPORT_COLORS.navy } },
+    alignment: { vertical: "center" },
+  };
+}
+
+function reportSectionStyle() {
+  return {
+    font: { name: "Arial", sz: 11, bold: true, color: { rgb: REPORT_COLORS.navy } },
+    fill: { patternType: "solid", fgColor: { rgb: REPORT_COLORS.blue } },
+    alignment: { vertical: "center" },
+  };
+}
+
+function reportStatusStyle(severity) {
+  const palette = severity === "red" ? [REPORT_COLORS.red, REPORT_COLORS.redText] :
+    severity === "yellow" ? [REPORT_COLORS.yellow, REPORT_COLORS.yellowText] :
+      [REPORT_COLORS.green, REPORT_COLORS.greenText];
+  return {
+    font: { name: "Arial", sz: 10, bold: true, color: { rgb: palette[1] } },
+    fill: { patternType: "solid", fgColor: { rgb: palette[0] } },
+    alignment: { horizontal: "center", vertical: "center", wrapText: true },
+  };
+}
+
+function styleReportRow(sheet, rowIndex, columnCount, style) {
+  for (let column = 0; column < columnCount; column += 1) {
+    const address = XLSX.utils.encode_cell({ r: rowIndex, c: column });
+    if (sheet[address]) sheet[address].s = style;
+  }
+}
+
+function comparisonConclusions(result, modifications, outputArchive, languageStats) {
+  const unexpected = result.differences.filter((row) =>
+    row.status !== "Only in source" && row.status !== "Only in output" && !auditEntryForRow(row, modifications)
+  ).length;
+  const structural = result.onlySource + result.onlyOutput;
+  const expected = Math.max(0, result.different - unexpected - structural);
+  const correction = languageStats.reduce((total, row) => ({
+    checks: total.checks + row.correctionChecks,
+    verified: total.verified + row.verified,
+    mismatched: total.mismatched + row.mismatched,
+    missing: total.missing + row.missing,
+    unmatched: total.unmatched + row.unmatched,
+    conflicts: total.conflicts + row.conflicts,
+    normalized: total.normalized + row.normalized,
+  }), { checks: 0, verified: 0, mismatched: 0, missing: 0, unmatched: 0, conflicts: 0, normalized: 0 });
+
+  const zipSeverity = structural || unexpected ? "red" : "green";
+  let correctionSeverity = "green";
+  if (!correction.checks) correctionSeverity = "yellow";
+  else if (correction.missing || correction.unmatched || correction.conflicts || correction.mismatched > 3) correctionSeverity = "red";
+  else if (correction.mismatched) correctionSeverity = "yellow";
+  const overallSeverity = [zipSeverity, correctionSeverity].includes("red") ? "red" :
+    [zipSeverity, correctionSeverity].includes("yellow") ? "yellow" : "green";
+  const label = (severity) => severity === "green" ? "PASS" : severity === "yellow" ? "MINOR / REVIEW" : "FAIL";
+  const rows = [
+    {
+      check: "Source ZIP vs output ZIP",
+      severity: zipSeverity,
+      result: label(zipSeverity),
+      details: `${result.matched} matching; ${expected} expected changes; ${unexpected} unrecorded changes; ${structural} added/removed resources.`,
+    },
+    {
+      check: "Output ZIP vs correction XLSX files",
+      severity: correctionSeverity,
+      result: correction.checks ? label(correctionSeverity) : "NOT EVALUATED",
+      details: correction.checks ?
+        `${correction.verified}/${correction.checks} checks verified; ${correction.mismatched} mismatched; ${correction.missing} missing; ${correction.unmatched} unmatched rules; ${correction.conflicts} conflicts; ${correction.normalized} XML newline normalizations.` :
+        "No correction checks were supplied for this browser session.",
+    },
+    {
+      check: "Overall conclusion",
+      severity: overallSeverity,
+      result: label(overallSeverity),
+      details: overallSeverity === "green" ?
+        "All detected ZIP changes are recorded and every correction check matches the generated XML." :
+        overallSeverity === "yellow" ? "No critical structural problem was detected, but the listed minor items require review." :
+          "At least one unexpected ZIP change or failed correction verification requires investigation.",
+    },
+  ];
+  return { rows, correction, expected, unexpected, structural, outputRecords: outputArchive.records.size };
+}
+
 function diffWorkbook(sourceFile, outputFile, sourceArchive, outputArchive, result, modifications) {
   const workbook = XLSX.utils.book_new();
-  const matchRate = result.total ? result.matched / result.total : 1;
   const languageStats = perLanguageStatistics(sourceArchive, outputArchive, modifications);
+  const correctedLanguages = languageStats.filter((row) => row.correctionChecks || row.capitalization).map((row) => row.language);
+  const orderedLanguages = [
+    ...correctedLanguages,
+    ...languageStats.map((row) => row.language).filter((language) => !correctedLanguages.includes(language)).sort((left, right) => {
+      if (left === "values") return -1;
+      if (right === "values") return 1;
+      return left.localeCompare(right);
+    }),
+  ];
+  const statsByLanguage = new Map(languageStats.map((row) => [row.language, row]));
+  const conclusions = comparisonConclusions(result, modifications, outputArchive, languageStats);
+  const metricRows = [
+    ["Total translation rows", (row) => row.total, result.total],
+    ["Matching rows", (row) => row.matched, result.matched],
+    ["Different rows", (row) => row.changed + row.onlySource + row.onlyOutput, result.different],
+    ["Changed values", (row) => row.changed, result.changed],
+    ["Only in source", (row) => row.onlySource, result.onlySource],
+    ["Only in output", (row) => row.onlyOutput, result.onlyOutput],
+    ["Match rate", (row) => row.total ? row.matched / row.total : 1, result.total ? result.matched / result.total : 1],
+    ["Correction targets", (row) => row.correctionTargets, languageStats.reduce((sum, row) => sum + row.correctionTargets, 0)],
+    ["Correction checks", (row) => row.correctionChecks, conclusions.correction.checks],
+    ["Verified correction checks", (row) => row.verified, conclusions.correction.verified],
+    ["Mismatched correction checks", (row) => row.mismatched, conclusions.correction.mismatched],
+    ["Missing correction outputs", (row) => row.missing, conclusions.correction.missing],
+    ["Unmatched correction rules", (row) => row.unmatched, conclusions.correction.unmatched],
+    ["Conflicting correction rules", (row) => row.conflicts, conclusions.correction.conflicts],
+    ["Capitalization changes", (row) => row.capitalization, languageStats.reduce((sum, row) => sum + row.capitalization, 0)],
+    ["XML newline normalizations", (row) => row.normalized, conclusions.correction.normalized],
+  ];
   const summaryRows = [
-    ["ZIP translation comparison", null],
+    ["ZIP translation comparison"],
     ["Source ZIP", sourceFile.name],
     ["Output ZIP", outputFile.name],
     ["Generated", new Date().toLocaleString()],
-    [null, null],
-    ["Metric", "Count"],
-    ["Total translation rows", result.total],
-    ["Matching rows", result.matched],
-    ["Different rows", result.different],
-    ["Changed values", result.changed],
-    ["Only in source", result.onlySource],
-    ["Only in output", result.onlyOutput],
-    ["Match rate", matchRate],
-    ["Source translation rows", sourceArchive.records.size],
-    ["Output translation rows", outputArchive.records.size],
-    ["Source translation XML files", sourceArchive.xmlFiles],
-    ["Output translation XML files", outputArchive.xmlFiles],
-    [null, null],
-    ["Statistics by language"],
-    [
-      "Language", "Total rows", "Matching", "Different", "Changed", "Only in source", "Only in output", "Match rate",
-      "Correction targets", "Correction checks", "Verified checks", "Mismatched checks", "Missing checks", "Unmatched correction rules", "Conflicts", "Capitalization changes",
-    ],
-    ...languageStats.map((row) => {
-      const different = row.changed + row.onlySource + row.onlyOutput;
-      return [
-        row.language, row.total, row.matched, different, row.changed, row.onlySource, row.onlyOutput,
-        row.total ? row.matched / row.total : 1,
-        row.correctionTargets, row.correctionChecks, row.verified, row.mismatched, row.missing, row.unmatched, row.conflicts, row.capitalization,
-      ];
-    }),
+    [],
+    ["Conclusions"],
+    ["Check", "Result", "Details"],
+    ...conclusions.rows.map((row) => [row.check, row.result, row.details]),
+    [],
+    ["Metrics by language (corrected languages first)"],
+    ["Metric", ...orderedLanguages, "Overall"],
+    ...metricRows.map(([metric, getter, overall]) => [metric, ...orderedLanguages.map((language) => getter(statsByLanguage.get(language))), overall]),
+    ["Source translation rows", ...orderedLanguages.map(() => null), sourceArchive.records.size],
+    ["Output translation rows", ...orderedLanguages.map(() => null), outputArchive.records.size],
+    ["Source translation XML files", ...orderedLanguages.map(() => null), sourceArchive.xmlFiles],
+    ["Output translation XML files", ...orderedLanguages.map(() => null), outputArchive.xmlFiles],
+    [],
+    ["How the comparison works"],
+    ["Step", "Method", "Why this is precise"],
+    ["1. Exact resource identity", "Each row is matched by full XML path + resource type + string ID + array item ID.", "Resources with the same ID in different XML files or array positions cannot overwrite each other."],
+    ["2. ZIP-to-ZIP value comparison", "Both archives are parsed and supported Android string and string-array values are compared as decoded text.", "ZIP compression, file order and container metadata do not create false differences; added and removed resources are reported separately."],
+    ["3. Correction-file verification", "Every matched row from every loaded correction XLSX is checked against the value written to the output XML.", "The Differences sheet records correction file, source row, original value, expected value and verification result for each check."],
+    ["4. XML newline handling", "CRLF and CR line endings are normalized to LF by XML rules before the final equality decision.", "A newline-only normalization is reported explicitly as MATCH (XML line endings normalized), not hidden as an error."],
+    ["5. Completeness and conflict checks", "The report counts missing output rows, unmatched correction rules, duplicate conflicting rules and unrecorded ZIP changes.", "PASS is issued only when all ZIP differences are traceable and all supplied correction checks match the generated XML."],
+    ["Scope", "The comparison covers Android <string> and <string-array> resources represented by this converter.", "The conclusion is auditable from the detailed rows and should be interpreted within this stated resource scope."],
   ];
   const summarySheet = XLSX.utils.aoa_to_sheet(summaryRows);
-  summarySheet["!cols"] = [
-    { wch: 34 }, { wch: 18 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 16 }, { wch: 16 }, { wch: 14 },
-    { wch: 18 }, { wch: 18 }, { wch: 17 }, { wch: 19 }, { wch: 16 }, { wch: 26 }, { wch: 12 }, { wch: 22 },
-  ];
-  if (summarySheet.B13) summarySheet.B13.z = "0.0%";
-  const languageHeaderIndex = 19;
-  for (let row = languageHeaderIndex + 1; row < summaryRows.length; row += 1) {
-    const address = XLSX.utils.encode_cell({ r: row, c: 7 });
-    if (summarySheet[address]) summarySheet[address].z = "0.0%";
+  summarySheet["!cols"] = [{ wch: 36 }, ...orderedLanguages.map(() => ({ wch: 16 })), { wch: 18 }];
+  summarySheet["!cols"][1] = { wch: Math.max(18, summarySheet["!cols"][1]?.wch || 0) };
+  summarySheet["!cols"][2] = { wch: Math.max(32, summarySheet["!cols"][2]?.wch || 0) };
+  summarySheet["!rows"] = summaryRows.map(() => ({ hpt: 18 }));
+  summarySheet["!rows"][0] = { hpt: 24 };
+  summarySheet.A1.s = reportTitleStyle();
+  summarySheet.A6.s = reportSectionStyle();
+  styleReportRow(summarySheet, 6, 3, reportHeaderStyle());
+  conclusions.rows.forEach((row, index) => {
+    summarySheet["!rows"][7 + index] = { hpt: 52 };
+    const resultCell = summarySheet[XLSX.utils.encode_cell({ r: 7 + index, c: 1 })];
+    if (resultCell) resultCell.s = reportStatusStyle(row.severity);
+  });
+  summarySheet.A12.s = reportSectionStyle();
+  styleReportRow(summarySheet, 12, orderedLanguages.length + 2, reportHeaderStyle());
+  const matchRateRow = 13 + metricRows.findIndex(([metric]) => metric === "Match rate");
+  for (let column = 1; column < orderedLanguages.length + 2; column += 1) {
+    const cell = summarySheet[XLSX.utils.encode_cell({ r: matchRateRow, c: column })];
+    if (cell) cell.z = "0.0%";
   }
-  summarySheet["!autofilter"] = { ref: `A${languageHeaderIndex + 1}:P${Math.max(languageHeaderIndex + 1, summaryRows.length)}` };
+  const methodologyIndex = summaryRows.findIndex((row) => row[0] === "How the comparison works");
+  summarySheet[XLSX.utils.encode_cell({ r: methodologyIndex, c: 0 })].s = reportSectionStyle();
+  styleReportRow(summarySheet, methodologyIndex + 1, 3, reportHeaderStyle());
+  for (let row = methodologyIndex + 2; row < summaryRows.length; row += 1) {
+    summarySheet["!rows"][row] = { hpt: 42 };
+    for (let column = 0; column < 3; column += 1) {
+      const cell = summarySheet[XLSX.utils.encode_cell({ r: row, c: column })];
+      if (cell) cell.s = { font: { name: "Arial", sz: 10 }, alignment: { vertical: "top", wrapText: true } };
+    }
+  }
   XLSX.utils.book_append_sheet(workbook, summarySheet, "Summary");
 
   const correctionLanguages = [...new Set([...modifications.values()].flatMap((entry) =>
     (entry.checks || []).map((check) => check.language)
   ))].sort((left, right) => left.localeCompare(right));
-  const differenceRows = [[
+  const differenceHeader = [
     "Status",
     "App",
     "Language",
@@ -708,7 +857,8 @@ function diffWorkbook(sourceFile, outputFile, sourceArchive, outputArchive, resu
       `${language} expected corrected value`,
       `${language} verification`,
     ]),
-  ]];
+  ];
+  const differenceRows = [];
   const reportRows = new Map();
   result.differences.forEach((row) => {
     reportRows.set(archiveRecordKey(row.xmlPath, row.resourceType, row.id, row.item), row);
@@ -766,14 +916,38 @@ function diffWorkbook(sourceFile, outputFile, sourceArchive, outputArchive, resu
       }),
     ]);
   });
-  const differencesSheet = XLSX.utils.aoa_to_sheet(differenceRows);
+  const differenceTableRows = differenceRows;
+  const differencesRows = [
+    ["Conclusions"],
+    ["Check", "Result", "Details"],
+    ...conclusions.rows.map((row) => [row.check, row.result, row.details]),
+    [],
+    differenceHeader,
+    ...differenceTableRows,
+  ];
+  const differencesSheet = XLSX.utils.aoa_to_sheet(differencesRows);
   differencesSheet["!cols"] = [
     { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 64 }, { wch: 20 },
     { wch: 16 }, { wch: 40 }, { wch: 12 }, { wch: 64 }, { wch: 64 }, { wch: 56 },
     ...correctionLanguages.flatMap(() => [{ wch: 38 }, { wch: 54 }, { wch: 54 }, { wch: 32 }]),
   ];
-  const lastColumn = XLSX.utils.encode_col(differenceRows[0].length - 1);
-  differencesSheet["!autofilter"] = { ref: `A1:${lastColumn}${Math.max(1, differenceRows.length)}` };
+  differencesSheet["!rows"] = differencesRows.map(() => ({ hpt: 18 }));
+  differencesSheet["!merges"] = [
+    { s: { r: 1, c: 2 }, e: { r: 1, c: 6 } },
+    ...conclusions.rows.map((_, index) => ({ s: { r: 2 + index, c: 2 }, e: { r: 2 + index, c: 6 } })),
+  ];
+  differencesSheet.A1.s = reportSectionStyle();
+  styleReportRow(differencesSheet, 1, 3, reportHeaderStyle());
+  conclusions.rows.forEach((row, index) => {
+    differencesSheet["!rows"][2 + index] = { hpt: 32 };
+    const cell = differencesSheet[XLSX.utils.encode_cell({ r: 2 + index, c: 1 })];
+    if (cell) cell.s = reportStatusStyle(row.severity);
+  });
+  const differenceHeaderIndex = 6;
+  styleReportRow(differencesSheet, differenceHeaderIndex, differenceHeader.length, reportHeaderStyle());
+  differencesSheet["!rows"][differenceHeaderIndex] = { hpt: 32 };
+  const lastColumn = XLSX.utils.encode_col(differenceHeader.length - 1);
+  differencesSheet["!autofilter"] = { ref: `A${differenceHeaderIndex + 1}:${lastColumn}${Math.max(differenceHeaderIndex + 1, differencesRows.length)}` };
   XLSX.utils.book_append_sheet(workbook, differencesSheet, "Differences");
   return workbook;
 }
@@ -783,7 +957,7 @@ async function compareArchives(sourceFile, outputFile, modifications = new Map()
   const outputArchive = await archiveRecords(outputFile, "output", (message) => showStatus(ui.compareStatus, message));
   const result = DiffEngine.compare(sourceArchive.records, outputArchive.records);
   const workbook = diffWorkbook(sourceFile, outputFile, sourceArchive, outputArchive, result, modifications);
-  const workbookBytes = new Uint8Array(XLSX.write(workbook, { bookType: "xlsx", type: "array", compression: true }));
+  const workbookBytes = new Uint8Array(XLSX.write(workbook, { bookType: "xlsx", type: "array", compression: true, cellStyles: true }));
   const sourceStem = sourceFile.name.replace(/\.[^.]+$/, "");
   const outputStem = outputFile.name.replace(/\.[^.]+$/, "");
   downloadBytes(

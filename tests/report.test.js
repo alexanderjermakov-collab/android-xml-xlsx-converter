@@ -3,7 +3,7 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
-const XLSX = require("../dist/assets/xlsx.full.min.js");
+const XLSX = require("../dist/assets/xlsx-js-style.bundle.js");
 const JSZip = require("../dist/assets/jszip.min.js");
 const CorrectionEngine = require("../dist/corrections.js");
 const DiffEngine = require("../dist/diff.js");
@@ -115,20 +115,29 @@ const workbook = diffWorkbook(
 );
 const summary = XLSX.utils.sheet_to_json(workbook.Sheets.Summary, { header: 1, raw: true, defval: null });
 const differences = XLSX.utils.sheet_to_json(workbook.Sheets.Differences, { header: 1, raw: true, defval: null });
-const summaryHeader = summary.findIndex((row) => row[0] === "Language");
-const slovakSummary = summary.slice(summaryHeader + 1).find((row) => row[0] === "values-sk");
-assert.ok(slovakSummary);
-assert.equal(slovakSummary[10], 1);
-assert.equal(slovakSummary[11], 0);
-assert.equal(slovakSummary[12], 0);
-assert.equal(slovakSummary[13], 1);
-assert.ok(differences[0].includes("values-sk correction source"));
-assert.ok(differences[0].includes("values-sk correction original value"));
-assert.ok(differences[0].includes("values-sk expected corrected value"));
-const verificationColumn = differences[0].indexOf("values-sk verification");
-assert.ok(differences.slice(1).some((row) => String(row[verificationColumn]).includes("MATCH")));
-assert.ok(differences.slice(1).some((row) => String(row[verificationColumn]).includes("TARGET NOT FOUND")));
-assert.match(workbook.Sheets.Differences["!autofilter"].ref, /^A1:O3$/);
+const summaryHeader = summary.find((row) => row[0] === "Metric");
+const slovakColumn = summaryHeader.indexOf("values-sk");
+assert.equal(slovakColumn, 1, "corrected language must be the first language column");
+assert.equal(summary.find((row) => row[0] === "Verified correction checks")[slovakColumn], 1);
+assert.equal(summary.find((row) => row[0] === "Mismatched correction checks")[slovakColumn], 0);
+assert.equal(summary.find((row) => row[0] === "Missing correction outputs")[slovakColumn], 0);
+assert.equal(summary.find((row) => row[0] === "Unmatched correction rules")[slovakColumn], 1);
+assert.ok(summary.some((row) => row[0] === "How the comparison works"));
+assert.ok(summary.some((row) => row[0] === "1. Exact resource identity"));
+assert.ok(summary.some((row) => row[0] === "Output ZIP vs correction XLSX files"));
+const differenceHeader = differences.find((row) => row[0] === "Status");
+assert.ok(differenceHeader.includes("values-sk correction source"));
+assert.ok(differenceHeader.includes("values-sk correction original value"));
+assert.ok(differenceHeader.includes("values-sk expected corrected value"));
+const verificationColumn = differenceHeader.indexOf("values-sk verification");
+const differenceHeaderIndex = differences.indexOf(differenceHeader);
+assert.ok(differences.slice(differenceHeaderIndex + 1).some((row) => String(row[verificationColumn]).includes("MATCH")));
+assert.ok(differences.slice(differenceHeaderIndex + 1).some((row) => String(row[verificationColumn]).includes("TARGET NOT FOUND")));
+assert.match(workbook.Sheets.Differences["!autofilter"].ref, /^A7:O9$/);
+assert.equal(workbook.Sheets.Differences.A2.s.font.bold, true);
+assert.equal(workbook.Sheets.Differences.B5.s.fill.fgColor.rgb, "FFC7CE");
+const roundTripWorkbook = XLSX.read(XLSX.write(workbook, { bookType: "xlsx", type: "buffer", cellStyles: true }), { type: "buffer", cellStyles: true });
+assert.equal(roundTripWorkbook.Sheets.Differences.B5.s.fgColor.rgb, "FFC7CE");
 
 const normalizedLineEndings = context.__test.diffWorkbook(
   { name: "source.zip" }, { name: "output.zip" }, sourceArchive,
@@ -140,7 +149,10 @@ const normalizedLineEndings = context.__test.diffWorkbook(
   }] }]]),
 );
 const normalizedRows = XLSX.utils.sheet_to_json(normalizedLineEndings.Sheets.Differences, { header: 1, raw: true, defval: null });
-const normalizedVerification = normalizedRows[0].indexOf("values-sk verification");
-assert.ok(normalizedRows.slice(1).some((row) => String(row[normalizedVerification]).includes("MATCH (XML line endings normalized)")));
+const normalizedHeader = normalizedRows.find((row) => row[0] === "Status");
+const normalizedVerification = normalizedHeader.indexOf("values-sk verification");
+assert.ok(normalizedRows.slice(normalizedRows.indexOf(normalizedHeader) + 1).some((row) => String(row[normalizedVerification]).includes("MATCH (XML line endings normalized)")));
+const normalizedSummary = XLSX.utils.sheet_to_json(normalizedLineEndings.Sheets.Summary, { header: 1, raw: true, defval: null });
+assert.equal(normalizedSummary.find((row) => row[0] === "XML newline normalizations")[1], 1);
 
 console.log("report and resource identity tests passed");
