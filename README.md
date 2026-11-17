@@ -11,6 +11,7 @@ Fully client-side HTML converter for Android translation archives.
 - optional capitalization alignment: when English starts with a capital letter, each available translation does too
 - corrected XLSX can be downloaded before rebuilding the ZIP
 - source and output ZIP archives can be compared row-by-row with an XLSX differences report
+- generated files automatically become the default inputs for the next workflow step
 - files never leave the browser
 
 Open `dist/index.html` through a local web server, or use the published GitHub Pages URL.
@@ -38,6 +39,10 @@ Select a source ZIP and an output ZIP. The application parses supported Android 
 
 - `Summary`: total, matching, different, changed, source-only, and output-only row counts;
 - `Differences`: one row per changed, missing, or added translation value with its language, XML path, resource ID, item ID, source value, and output value.
+
+The `Differences` sheet includes a `Conclusion` column. During a connected browser session it identifies correction-file changes, including the correction filename and language, capitalization changes, additions, and removals. The first row has Excel filters across every report column.
+
+The ZIP selected in step 01 and the ZIP generated in step 02 are used automatically when the comparison upload fields are empty. Likewise, the XLSX generated in step 01 becomes the default correction input, and a corrected XLSX becomes the default input for ZIP conversion.
 
 Comparison is based on parsed translation values rather than ZIP compression or binary file bytes.
 

@@ -153,10 +153,25 @@
           const current = text(matrix[row]?.[column]);
           if (current === rule.oldText) {
             matrix[row][column] = rule.newText;
-            changedCells.set(`${row}:${column}`, { row, column, value: rule.newText });
+            changedCells.set(`${row}:${column}`, {
+              row,
+              column,
+              value: rule.newText,
+              language: rule.language,
+              sourceRow: rule.sourceRow,
+              alreadyApplied: false,
+            });
             replacements += 1;
             ruleMatches = 1;
           } else if (current === rule.newText) {
+            changedCells.set(`${row}:${column}`, {
+              row,
+              column,
+              value: rule.newText,
+              language: rule.language,
+              sourceRow: rule.sourceRow,
+              alreadyApplied: true,
+            });
             alreadyApplied += 1;
             ruleMatches = 1;
           }
@@ -168,7 +183,14 @@
           for (let row = 1; row < matrix.length; row += 1) {
             if (text(matrix[row]?.[column]) !== rule.oldText) continue;
             matrix[row][column] = rule.newText;
-            changedCells.set(`${row}:${column}`, { row, column, value: rule.newText });
+            changedCells.set(`${row}:${column}`, {
+              row,
+              column,
+              value: rule.newText,
+              language,
+              sourceRow: rule.sourceRow,
+              alreadyApplied: false,
+            });
             replacements += 1;
             ruleMatches += 1;
           }
@@ -245,7 +267,7 @@
         const updated = uppercaseFirstLetter(matrix[row][column], localeForColumn(header));
         if (updated === text(matrix[row][column])) continue;
         matrix[row][column] = updated;
-        changedCells.set(`${row}:${column}`, { row, column, value: updated });
+        changedCells.set(`${row}:${column}`, { row, column, value: updated, language: header });
         capitalized += 1;
       }
     }

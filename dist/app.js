@@ -28,6 +28,9 @@ const ui = {
   compareOutputInput: document.querySelector("#compareOutputInput"),
   compareButton: document.querySelector("#compareButton"),
   compareStatus: document.querySelector("#compareStatus"),
+  xlsxName: document.querySelector("#xlsxName"),
+  compareSourceName: document.querySelector("#compareSourceName"),
+  compareOutputName: document.querySelector("#compareOutputName"),
   languagePanel: document.querySelector("#languagePanel"),
   languageList: document.querySelector("#languageList"),
   languageCount: document.querySelector("#languageCount"),
@@ -37,6 +40,13 @@ const ui = {
 };
 
 let languageState = { fileToken: "", columns: [], ready: false };
+const pipeline = {
+  activeWorkbook: null,
+  activeModifications: new Map(),
+  sourceZip: null,
+  outputZip: null,
+  outputModifications: new Map(),
+};
 
 function showStatus(node, message, kind = "working") {
   node.textContent = message;
@@ -66,6 +76,45 @@ wireFileInput(ui.referenceInput, "referenceName", "referenceDrop");
 wireFileInput(ui.correctionInput, "correctionName", "correctionDrop");
 wireFileInput(ui.compareSourceInput, "compareSourceName", "compareSourceDrop");
 wireFileInput(ui.compareOutputInput, "compareOutputName", "compareOutputDrop");
+
+function browserFile(bytes, filename, mime) {
+  return new File([bytes], filename, { type: mime, lastModified: Date.now() });
+}
+
+function showDefaultFile(node, input, file, description) {
+  if (!input.files.length && file) node.textContent = `${description}: ${file.name}`;
+}
+
+function setActiveWorkbook(file, description, modifications = new Map()) {
+  pipeline.activeWorkbook = file;
+  pipeline.activeModifications = new Map(modifications);
+  ui.xlsxName.textContent = `${description}: ${file.name}`;
+}
+
+function activeWorkbook() {
+  return pipeline.activeWorkbook || ui.xlsxInput.files[0] || null;
+}
+
+function setSourceZip(file) {
+  if (pipeline.sourceZip && pipeline.sourceZip !== file) {
+    pipeline.outputZip = null;
+    pipeline.outputModifications = new Map();
+    if (!ui.compareOutputInput.files.length) ui.compareOutputName.textContent = "";
+  }
+  pipeline.sourceZip = file;
+  showDefaultFile(ui.compareSourceName, ui.compareSourceInput, file, "Default source");
+}
+
+function setOutputZip(file, modifications) {
+  pipeline.outputZip = file;
+  pipeline.outputModifications = new Map(modifications);
+  showDefaultFile(ui.compareOutputName, ui.compareOutputInput, file, "Default output");
+}
+
+ui.xlsxInput.addEventListener("change", () => {
+  const file = ui.xlsxInput.files[0];
+  if (file) setActiveWorkbook(file, "Selected workbook");
+});
 
 function downloadBytes(bytes, filename, mime) {
   const blob = new Blob([bytes], { type: mime });
@@ -225,6 +274,7 @@ ui.zipInput.addEventListener("change", async () => {
     languageState = { fileToken: "", columns: [], ready: false };
     return;
   }
+  setSourceZip(file);
   ui.zipButton.disabled = true;
   showStatus(ui.zipStatus, "Scanning available languages…");
   try {
@@ -343,7 +393,8 @@ async function archiveRecords(file, label, onProgress) {
       const isArrayFile = info.filename === "arrays.xml" || info.filename === "strings.xml";
       if (element.localName === "string-array" && isArrayFile) {
         directChildren(element, "item").forEach((item, itemIndex) => {
-          const key = archiveRecordKey(entry.name, "string-array", id, itemIndex);
+          const itemValue = info.variant ? `${itemIndex}${info.variant}` : itemIndex;
+          const key = archiveRecordKey(entry.name, "string-array", id, itemValue);
           records.set(key, {
             app: info.app,
             language: info.column,
@@ -351,7 +402,7 @@ async function archiveRecords(file, label, onProgress) {
             filename: info.filename,
             resourceType: "string-array",
             id,
-            item: itemIndex,
+            item: itemValue,
             value: item.textContent || "",
           });
         });
@@ -359,7 +410,8 @@ async function archiveRecords(file, label, onProgress) {
         element.localName === "string" &&
         (info.filename.startsWith("strings") || info.filename.endsWith("strings.xml"))
       ) {
-        const key = archiveRecordKey(entry.name, "string", id, null);
+        const itemValue = info.variant || null;
+        const key = archiveRecordKey(entry.name, "string", id, itemValue);
         records.set(key, {
           app: info.app,
           language: info.column,
@@ -367,7 +419,7 @@ async function archiveRecords(file, label, onProgress) {
           filename: info.filename,
           resourceType: "string",
           id,
-          item: null,
+          item: itemValue,
           value: element.textContent || "",
         });
       }
@@ -380,7 +432,14 @@ async function archiveRecords(file, label, onProgress) {
   return { records, xmlFiles: entries.length };
 }
 
-function diffWorkbook(sourceFile, outputFile, sourceArchive, outputArchive, result) {
+function differenceConclusion(row, modifications) {
+  if (row.status === "Only in source") return "Removed from output ZIP";
+  if (row.status === "Only in output") return "Added to output ZIP";
+  const reasons = modifications.get(modificationKey(row.app, row.id, row.item, row.language));
+  return reasons?.length ? reasons.join("; ") : "Modified value (reason not recorded in this browser session)";
+}
+
+function diffWorkbook(sourceFile, outputFile, sourceArchive, outputArchive, result, modifications) {
   const workbook = XLSX.utils.book_new();
   const matchRate = result.total ? result.matched / result.total : 1;
   const summaryRows = [
@@ -418,34 +477,39 @@ function diffWorkbook(sourceFile, outputFile, sourceArchive, outputArchive, resu
     "item ID",
     "Source value",
     "Output value",
+    "Conclusion",
   ]];
-  result.differences.forEach((row) => differenceRows.push([
-    row.status,
-    row.app,
-    row.language,
-    row.xmlPath,
-    row.filename,
-    row.resourceType,
-    row.id,
-    row.item,
-    row.sourceValue,
-    row.outputValue,
-  ]));
+  result.differences.forEach((row) => {
+    row.conclusion = differenceConclusion(row, modifications);
+    differenceRows.push([
+      row.status,
+      row.app,
+      row.language,
+      row.xmlPath,
+      row.filename,
+      row.resourceType,
+      row.id,
+      row.item,
+      row.sourceValue,
+      row.outputValue,
+      row.conclusion,
+    ]);
+  });
   const differencesSheet = XLSX.utils.aoa_to_sheet(differenceRows);
   differencesSheet["!cols"] = [
     { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 64 }, { wch: 20 },
-    { wch: 16 }, { wch: 40 }, { wch: 12 }, { wch: 64 }, { wch: 64 },
+    { wch: 16 }, { wch: 40 }, { wch: 12 }, { wch: 64 }, { wch: 64 }, { wch: 56 },
   ];
-  if (differenceRows.length > 1) differencesSheet["!autofilter"] = { ref: `A1:J${differenceRows.length}` };
+  differencesSheet["!autofilter"] = { ref: `A1:K${Math.max(1, differenceRows.length)}` };
   XLSX.utils.book_append_sheet(workbook, differencesSheet, "Differences");
   return workbook;
 }
 
-async function compareArchives(sourceFile, outputFile) {
+async function compareArchives(sourceFile, outputFile, modifications = new Map()) {
   const sourceArchive = await archiveRecords(sourceFile, "source", (message) => showStatus(ui.compareStatus, message));
   const outputArchive = await archiveRecords(outputFile, "output", (message) => showStatus(ui.compareStatus, message));
   const result = DiffEngine.compare(sourceArchive.records, outputArchive.records);
-  const workbook = diffWorkbook(sourceFile, outputFile, sourceArchive, outputArchive, result);
+  const workbook = diffWorkbook(sourceFile, outputFile, sourceArchive, outputArchive, result, modifications);
   const workbookBytes = new Uint8Array(XLSX.write(workbook, { bookType: "xlsx", type: "array", compression: true }));
   const sourceStem = sourceFile.name.replace(/\.[^.]+$/, "");
   const outputStem = outputFile.name.replace(/\.[^.]+$/, "");
@@ -543,6 +607,13 @@ async function correctionRules(file, translationHeaders) {
 async function applyCorrectionOptions(matrix, correctionFiles, capitalizationEnabled) {
   const headers = (matrix[0] || []).slice(3).map(String);
   const changes = new Map();
+  const addChange = (change, reason) => {
+    const key = `${change.row}:${change.column}`;
+    const existing = changes.get(key);
+    const reasons = new Set(existing?.reasons || []);
+    reasons.add(reason);
+    changes.set(key, { ...change, reasons: [...reasons] });
+  };
   let replacements = 0;
   let matchedRules = 0;
   let unmatchedRules = 0;
@@ -561,12 +632,14 @@ async function applyCorrectionOptions(matrix, correctionFiles, capitalizationEna
     matchedRules += result.matchedRules;
     unmatchedRules += result.unmatchedRules;
     alreadyApplied += result.alreadyApplied || 0;
-    result.changes.forEach((change) => changes.set(`${change.row}:${change.column}`, change));
+    result.changes.forEach((change) => {
+      addChange(change, `Correction file: ${correctionFile.name} (${change.language || headers[change.column - 3]})`);
+    });
   }
   if (capitalizationEnabled) {
     const result = CorrectionEngine.applyCapitalization(matrix);
     capitalized = result.capitalized;
-    result.changes.forEach((change) => changes.set(`${change.row}:${change.column}`, change));
+    result.changes.forEach((change) => addChange(change, "Capitalization"));
   }
   return {
     files: correctionFiles.length,
@@ -577,6 +650,25 @@ async function applyCorrectionOptions(matrix, correctionFiles, capitalizationEna
     capitalized,
     changes: [...changes.values()],
   };
+}
+
+function modificationKey(app, id, item, language) {
+  const itemValue = item === null || item === undefined || item === "" ? "" : String(item);
+  return `${String(app)}\u001f${String(id)}\u001f${itemValue}\u001f${String(language)}`;
+}
+
+function modificationAudit(matrix, changes, existing = new Map()) {
+  const audit = new Map(existing);
+  const headers = (matrix[0] || []).slice(3).map(String);
+  for (const change of changes) {
+    const row = matrix[change.row] || [];
+    const language = change.language || headers[change.column - 3];
+    const key = modificationKey(row[0], row[1], row[2], language);
+    const reasons = new Set(audit.get(key) || []);
+    (change.reasons || []).forEach((reason) => reasons.add(reason));
+    audit.set(key, [...reasons]);
+  }
+  return audit;
 }
 
 function writeWorkbookChanges(workbook, changes) {
@@ -620,10 +712,14 @@ async function createCorrectedWorkbook(xlsxFile, correctionFiles, capitalization
   const workbook = XLSX.read(xlsxBytes, { type: "array", cellFormula: false, cellStyles: true });
   const matrix = workbookMatrix(workbook);
   const result = await applyCorrectionOptions(matrix, correctionFiles, capitalizationEnabled);
+  const audit = modificationAudit(matrix, result.changes, pipeline.activeModifications);
   writeWorkbookChanges(workbook, result.changes);
   const output = new Uint8Array(XLSX.write(workbook, { bookType: "xlsx", type: "array", compression: true }));
-  downloadBytes(output, namedOutput(xlsxFile.name, "corrected", "xlsx"), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-  return { message: `Corrected XLSX created: ${correctionSummary(result)}.`, result };
+  const filename = namedOutput(xlsxFile.name, "corrected", "xlsx");
+  downloadBytes(output, filename, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  const generatedFile = browserFile(output, filename, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  setActiveWorkbook(generatedFile, "Default corrected workbook", audit);
+  return { message: `Corrected XLSX created and selected for ZIP conversion: ${correctionSummary(result)}.`, result };
 }
 
 function readRoundTrip(workbook) {
@@ -672,6 +768,8 @@ async function createWorkbook(zipFile, selectedColumns) {
   const workbookBytes = new Uint8Array(XLSX.write(workbook, { bookType: "xlsx", type: "array", compression: true }));
   const filename = outputName(zipFile.name, "xlsx");
   downloadBytes(workbookBytes, filename, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  const generatedFile = browserFile(workbookBytes, filename, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  setActiveWorkbook(generatedFile, "Default generated workbook");
   const languageCount = headers.filter((header) => header !== "values").length;
   return {
     message: `XLSX created: ${rows.length.toLocaleString()} rows, ${languageCount.toLocaleString()} languages, ${extracted.processedFiles.toLocaleString()} XML files.`,
@@ -855,6 +953,7 @@ async function createArchive(xlsxFile, referenceFile, correctionFiles, capitaliz
   const matrix = workbookMatrix(workbook);
   const metadata = readRoundTrip(workbook);
   const corrections = await applyCorrectionOptions(matrix, correctionFiles, capitalizationEnabled);
+  const audit = modificationAudit(matrix, corrections.changes, pipeline.activeModifications);
 
   let templateBytes;
   if (metadata) templateBytes = metadata.zipBytes;
@@ -864,9 +963,12 @@ async function createArchive(xlsxFile, referenceFile, correctionFiles, capitaliz
   const rebuilt = await rebuildArchive(templateBytes, matrix, (message) => showStatus(ui.xlsxStatus, message));
   const filename = outputName(xlsxFile.name, "zip");
   downloadBytes(rebuilt.output, filename, "application/zip");
+  const outputFile = browserFile(rebuilt.output, filename, "application/zip");
+  setOutputZip(outputFile, audit);
   return {
-    message: `ZIP created: ${rebuilt.processedRows.toLocaleString()} rows, ${rebuilt.languageCount.toLocaleString()} languages, ${rebuilt.rewrittenDocuments.toLocaleString()} XML files. Corrections: ${correctionSummary(corrections)}.`,
+    message: `ZIP created and selected for comparison: ${rebuilt.processedRows.toLocaleString()} rows, ${rebuilt.languageCount.toLocaleString()} languages, ${rebuilt.rewrittenDocuments.toLocaleString()} XML files. Corrections: ${correctionSummary(corrections)}.`,
     exact: false,
+    outputFile,
   };
 }
 
@@ -879,6 +981,7 @@ ui.zipButton.addEventListener("click", async () => {
   setBusy(ui.zipButton, true);
   showStatus(ui.zipStatus, "Opening archive…");
   try {
+    setSourceZip(file);
     if (!languageState.ready || languageState.fileToken !== fileToken(file)) await scanArchiveLanguages(file);
     const result = await createWorkbook(file, selectedLanguageColumns());
     showStatus(ui.zipStatus, result.message, "success");
@@ -891,9 +994,9 @@ ui.zipButton.addEventListener("click", async () => {
 });
 
 ui.xlsxButton.addEventListener("click", async () => {
-  const file = ui.xlsxInput.files[0];
+  const file = activeWorkbook();
   if (!file) {
-    showStatus(ui.xlsxStatus, "Choose an XLSX workbook first.", "error");
+    showStatus(ui.xlsxStatus, "Create or choose an XLSX workbook first.", "error");
     return;
   }
   setBusy(ui.xlsxButton, true);
@@ -920,9 +1023,9 @@ ui.correctionTemplateButton.addEventListener("click", () => {
 });
 
 ui.correctedXlsxButton.addEventListener("click", async () => {
-  const file = ui.xlsxInput.files[0];
+  const file = activeWorkbook();
   if (!file) {
-    showStatus(ui.xlsxStatus, "Choose an XLSX workbook first.", "error");
+    showStatus(ui.xlsxStatus, "Create or choose an XLSX workbook first.", "error");
     return;
   }
   setBusy(ui.correctedXlsxButton, true);
@@ -943,8 +1046,8 @@ ui.correctedXlsxButton.addEventListener("click", async () => {
 });
 
 ui.compareButton.addEventListener("click", async () => {
-  const sourceFile = ui.compareSourceInput.files[0];
-  const outputFile = ui.compareOutputInput.files[0];
+  const sourceFile = ui.compareSourceInput.files[0] || pipeline.sourceZip;
+  const outputFile = ui.compareOutputInput.files[0] || pipeline.outputZip;
   if (!sourceFile || !outputFile) {
     showStatus(ui.compareStatus, "Choose both the source ZIP and output ZIP.", "error");
     return;
@@ -952,7 +1055,8 @@ ui.compareButton.addEventListener("click", async () => {
   setBusy(ui.compareButton, true);
   showStatus(ui.compareStatus, "Opening archives…");
   try {
-    const result = await compareArchives(sourceFile, outputFile);
+    const modifications = outputFile === pipeline.outputZip ? pipeline.outputModifications : new Map();
+    const result = await compareArchives(sourceFile, outputFile, modifications);
     showStatus(
       ui.compareStatus,
       `Compared ${result.total.toLocaleString()} translation rows: ${result.matched.toLocaleString()} match, ${result.different.toLocaleString()} differ. XLSX report downloaded.`,

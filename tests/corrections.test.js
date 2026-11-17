@@ -27,6 +27,7 @@ assert.equal(matrix[2][6], "updated");
 
 const capitalization = engine.applyCapitalization(matrix);
 assert.equal(capitalization.capitalized, 6);
+assert.equal(capitalization.changes[0].language.startsWith("values-"), true);
 assert.equal(matrix[3][4], "Nastavenia");
 assert.equal(matrix[3][5], "Nastavení");
 assert.equal(matrix[3][6], "İstanbul");
@@ -54,7 +55,11 @@ const keyedRules = [
 const keyedResult = engine.applyRules(keyedMatrix, keyedRules);
 assert.equal(keyedResult.replacements, 2);
 assert.equal(keyedResult.unmatchedRules, 0);
+assert.deepEqual(new Set(keyedResult.changes.map((change) => change.language)), new Set(["values-sk", "values-cs"]));
 assert.equal(keyedMatrix[1][4], "Iba na vývoj");
 assert.equal(keyedMatrix[2][5], "shodné");
+const repeatedResult = engine.applyRules(keyedMatrix, keyedRules);
+assert.equal(repeatedResult.alreadyApplied, 2);
+assert.equal(repeatedResult.changes.every((change) => change.alreadyApplied), true);
 
 console.log("correction engine tests passed");
