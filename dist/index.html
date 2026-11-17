@@ -10,11 +10,16 @@
   <script defer src="assets/xlsx-js-style.bundle.js"></script>
   <script defer src="corrections.js?v=20261117-4"></script>
   <script defer src="diff.js?v=20261117-3"></script>
-  <script defer src="app.js?v=20261117-5"></script>
+  <script defer src="app.js?v=20261117-6"></script>
 </head>
 <body>
   <header class="shell">
-    <div class="eyebrow">Translation utility</div>
+    <div class="hero-meta">
+      <div class="eyebrow">Translation utility</div>
+      <button class="about-button" id="aboutButton" type="button" aria-haspopup="dialog" aria-controls="aboutDialog">
+        About <span id="aboutVersionBadge">v1.2.0</span>
+      </button>
+    </div>
     <h1>Google TV RTK. Language files<br>ZIP((XML)-XLSX-ZIP(XML) convertor</h1>
     <p class="lede">Consolidate Android <code>values*</code> resources into the established XLSX translation table, then rebuild the original ZIP hierarchy after review.</p>
     <div class="privacy"><span class="dot"></span>Files stay on this device. Nothing is uploaded.</div>
@@ -127,6 +132,24 @@
       <div class="note"><strong>Connected workflow</strong><span>Generated XLSX and ZIP files automatically become the default inputs for the next step and comparison.</span></div>
     </section>
   </main>
+
+  <dialog class="about-dialog" id="aboutDialog" aria-labelledby="aboutTitle">
+    <div class="about-dialog-header">
+      <div>
+        <span class="about-kicker">Application information</span>
+        <h2 id="aboutTitle">About</h2>
+      </div>
+      <button class="about-close" id="aboutClose" type="button" aria-label="Close About dialog">×</button>
+    </div>
+    <div class="about-dialog-body">
+      <strong>Google TV RTK. Language files ZIP((XML)-XLSX-ZIP(XML) convertor</strong>
+      <dl class="about-details">
+        <div><dt>Version</dt><dd id="aboutVersion">1.2.0</dd></div>
+        <div><dt>Release date</dt><dd id="aboutReleaseDate">17 November 2026</dd></div>
+      </dl>
+      <p>Browser-based conversion, correction and verification of Google TV RTK Android language resources.</p>
+    </div>
+  </dialog>
 
   <footer class="shell">Open-source browser utility. XLSX support is provided by SheetJS; archive handling by JSZip.</footer>
 </body>

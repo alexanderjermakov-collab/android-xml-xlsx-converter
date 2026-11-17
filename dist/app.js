@@ -7,6 +7,8 @@ const RESOURCE_MAP_SHEET = "_ResourceMap";
 const RESOURCE_MAP_MARKER = "ANDROID_XML_RESOURCE_MAP_V2";
 const SHEET_NAME = "All translations";
 const CHUNK_SIZE = 30000;
+const APP_VERSION = "1.2.0";
+const APP_RELEASE_DATE = "17 November 2026";
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder("utf-8");
 const schemaPromise = fetch("reference-schema.json").then((response) => {
@@ -44,7 +46,22 @@ const ui = {
   languageSearch: document.querySelector("#languageSearch"),
   selectAllLanguages: document.querySelector("#selectAllLanguages"),
   clearLanguages: document.querySelector("#clearLanguages"),
+  aboutButton: document.querySelector("#aboutButton"),
+  aboutDialog: document.querySelector("#aboutDialog"),
+  aboutClose: document.querySelector("#aboutClose"),
+  aboutVersionBadge: document.querySelector("#aboutVersionBadge"),
+  aboutVersion: document.querySelector("#aboutVersion"),
+  aboutReleaseDate: document.querySelector("#aboutReleaseDate"),
 };
+
+ui.aboutVersionBadge.textContent = `v${APP_VERSION}`;
+ui.aboutVersion.textContent = APP_VERSION;
+ui.aboutReleaseDate.textContent = APP_RELEASE_DATE;
+ui.aboutButton.addEventListener("click", () => ui.aboutDialog.showModal());
+ui.aboutClose.addEventListener("click", () => ui.aboutDialog.close());
+ui.aboutDialog.addEventListener("click", (event) => {
+  if (event.target === ui.aboutDialog) ui.aboutDialog.close();
+});
 
 let languageState = { fileToken: "", columns: [], ready: false };
 const pipeline = {
