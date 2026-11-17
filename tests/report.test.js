@@ -130,4 +130,17 @@ assert.ok(differences.slice(1).some((row) => String(row[verificationColumn]).inc
 assert.ok(differences.slice(1).some((row) => String(row[verificationColumn]).includes("TARGET NOT FOUND")));
 assert.match(workbook.Sheets.Differences["!autofilter"].ref, /^A1:O3$/);
 
+const normalizedLineEndings = context.__test.diffWorkbook(
+  { name: "source.zip" }, { name: "output.zip" }, sourceArchive,
+  { records: new Map([[key, { ...outputRecord, value: "line 1\nline 2" }]]), xmlFiles: 1 },
+  DiffEngine.compare(sourceArchive.records, new Map([[key, { ...outputRecord, value: "line 1\nline 2" }]])),
+  new Map([[key, { ...modifications.get(key), checks: [{
+    file: "Slovak corrections.xlsx", language: "values-sk", sourceRow: 2,
+    originalValue: "staré", expectedValue: "line 1\r\nline 2",
+  }] }]]),
+);
+const normalizedRows = XLSX.utils.sheet_to_json(normalizedLineEndings.Sheets.Differences, { header: 1, raw: true, defval: null });
+const normalizedVerification = normalizedRows[0].indexOf("values-sk verification");
+assert.ok(normalizedRows.slice(1).some((row) => String(row[normalizedVerification]).includes("MATCH (XML line endings normalized)")));
+
 console.log("report and resource identity tests passed");

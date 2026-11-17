@@ -581,6 +581,9 @@ function correctionEvaluation(audit, outputRecord) {
     if (check.targetMissing) status = "TARGET NOT FOUND";
     else if (!outputRecord) status = "MISSING OUTPUT";
     else if (String(outputRecord.value ?? "") === String(check.expectedValue ?? "")) status = "MATCH";
+    else if (String(outputRecord.value ?? "").replace(/\r\n?/g, "\n") === String(check.expectedValue ?? "").replace(/\r\n?/g, "\n")) {
+      status = "MATCH (XML line endings normalized)";
+    }
     else status = "MISMATCH";
     return { ...check, status };
   });
@@ -588,7 +591,7 @@ function correctionEvaluation(audit, outputRecord) {
   if (checks.length) {
     if (conflict) status = "CONFLICT";
     else if (results.some((check) => check.status === "TARGET NOT FOUND")) status = "TARGET NOT FOUND";
-    else if (results.every((check) => check.status === "MATCH")) status = "MATCH";
+    else if (results.every((check) => check.status.startsWith("MATCH"))) status = "MATCH";
     else if (results.some((check) => check.status === "MISSING OUTPUT")) status = "MISSING OUTPUT";
     else status = "MISMATCH";
   }
@@ -622,7 +625,7 @@ function perLanguageStatistics(sourceArchive, outputArchive, modifications) {
     if (evaluation.checks.length) {
       if (!evaluation.checks.every((check) => check.targetMissing)) row.correctionTargets += 1;
       row.correctionChecks += evaluation.checks.length;
-      row.verified += evaluation.results.filter((check) => check.status === "MATCH").length;
+      row.verified += evaluation.results.filter((check) => check.status.startsWith("MATCH")).length;
       row.mismatched += evaluation.results.filter((check) => check.status === "MISMATCH").length;
       row.missing += evaluation.results.filter((check) => check.status === "MISSING OUTPUT").length;
       row.unmatched += evaluation.results.filter((check) => check.status === "TARGET NOT FOUND").length;
