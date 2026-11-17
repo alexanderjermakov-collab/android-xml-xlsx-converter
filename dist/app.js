@@ -49,7 +49,8 @@ function wireFileInput(input, nameNodeId, dropNodeId) {
   const nameNode = document.querySelector(`#${nameNodeId}`);
   const dropNode = document.querySelector(`#${dropNodeId}`);
   input.addEventListener("change", () => {
-    nameNode.textContent = input.files[0]?.name || "";
+    const files = Array.from(input.files || []);
+    nameNode.textContent = files.length > 1 ? `${files.length} files: ${files.map((file) => file.name).join(", ")}` : (files[0]?.name || "");
   });
   ["dragenter", "dragover"].forEach((eventName) => dropNode.addEventListener(eventName, () => dropNode.classList.add("dragging")));
   ["dragleave", "drop"].forEach((eventName) => dropNode.addEventListener(eventName, () => dropNode.classList.remove("dragging")));
@@ -391,7 +392,6 @@ function workbookMatrix(workbook) {
 }
 
 async function correctionRules(file, translationHeaders) {
-  if (!file) return [];
   const bytes = new Uint8Array(await file.arrayBuffer());
   const workbook = XLSX.read(bytes, { type: "array", cellFormula: false, cellStyles: false });
   const sheetName = workbook.SheetNames[0];
@@ -400,20 +400,27 @@ async function correctionRules(file, translationHeaders) {
   return CorrectionEngine.parseRules(matrix, translationHeaders);
 }
 
-async function applyCorrectionOptions(matrix, correctionFile, capitalizationEnabled) {
+async function applyCorrectionOptions(matrix, correctionFiles, capitalizationEnabled) {
   const headers = (matrix[0] || []).slice(3).map(String);
   const changes = new Map();
   let replacements = 0;
   let matchedRules = 0;
   let unmatchedRules = 0;
+  let alreadyApplied = 0;
   let capitalized = 0;
 
-  if (correctionFile) {
-    const rules = await correctionRules(correctionFile, headers);
+  for (const correctionFile of correctionFiles) {
+    let rules;
+    try {
+      rules = await correctionRules(correctionFile, headers);
+    } catch (error) {
+      throw new Error(`${correctionFile.name}: ${error.message || String(error)}`);
+    }
     const result = CorrectionEngine.applyRules(matrix, rules);
-    replacements = result.replacements;
-    matchedRules = result.matchedRules;
-    unmatchedRules = result.unmatchedRules;
+    replacements += result.replacements;
+    matchedRules += result.matchedRules;
+    unmatchedRules += result.unmatchedRules;
+    alreadyApplied += result.alreadyApplied || 0;
     result.changes.forEach((change) => changes.set(`${change.row}:${change.column}`, change));
   }
   if (capitalizationEnabled) {
@@ -421,7 +428,15 @@ async function applyCorrectionOptions(matrix, correctionFile, capitalizationEnab
     capitalized = result.capitalized;
     result.changes.forEach((change) => changes.set(`${change.row}:${change.column}`, change));
   }
-  return { replacements, matchedRules, unmatchedRules, capitalized, changes: [...changes.values()] };
+  return {
+    files: correctionFiles.length,
+    replacements,
+    matchedRules,
+    unmatchedRules,
+    alreadyApplied,
+    capitalized,
+    changes: [...changes.values()],
+  };
 }
 
 function writeWorkbookChanges(workbook, changes) {
@@ -440,7 +455,9 @@ function writeWorkbookChanges(workbook, changes) {
 
 function correctionSummary(result) {
   const parts = [];
+  if (result.files) parts.push(`${result.files.toLocaleString()} correction files`);
   if (result.replacements) parts.push(`${result.replacements.toLocaleString()} text replacements`);
+  if (result.alreadyApplied) parts.push(`${result.alreadyApplied.toLocaleString()} already applied`);
   if (result.capitalized) parts.push(`${result.capitalized.toLocaleString()} capitalization fixes`);
   if (result.unmatchedRules) parts.push(`${result.unmatchedRules.toLocaleString()} unmatched correction rules`);
   return parts.length ? parts.join(", ") : "no cell changes";
@@ -448,27 +465,21 @@ function correctionSummary(result) {
 
 function downloadCorrectionTemplate() {
   const workbook = XLSX.utils.book_new();
-  const corrections = XLSX.utils.aoa_to_sheet([["Language", "Old text", "New text"]]);
-  corrections["!cols"] = [{ wch: 24 }, { wch: 46 }, { wch: 46 }];
-  XLSX.utils.book_append_sheet(workbook, corrections, "Corrections");
-  const instructions = XLSX.utils.aoa_to_sheet([
-    ["Field", "How to use it"],
-    ["Language", "Use values-sk, values-cs; values-sk; values-cs for several languages; or all."],
-    ["Old text", "The complete current cell text. Matching is exact."],
-    ["New text", "The complete replacement text."],
+  const corrections = XLSX.utils.aoa_to_sheet([
+    ["App", "string ID", "item ID", "values", "values-xx (original)", "values-xx (corrected)"],
   ]);
-  instructions["!cols"] = [{ wch: 18 }, { wch: 88 }];
-  XLSX.utils.book_append_sheet(workbook, instructions, "Instructions");
+  corrections["!cols"] = [{ wch: 10 }, { wch: 36 }, { wch: 8 }, { wch: 56 }, { wch: 28 }, { wch: 28 }];
+  XLSX.utils.book_append_sheet(workbook, corrections, "List1");
   const bytes = new Uint8Array(XLSX.write(workbook, { bookType: "xlsx", type: "array", compression: true }));
   downloadBytes(bytes, "language_correction_template.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
 }
 
-async function createCorrectedWorkbook(xlsxFile, correctionFile, capitalizationEnabled) {
-  if (!correctionFile && !capitalizationEnabled) throw new Error("Choose a correction workbook or enable the capitalization rule.");
+async function createCorrectedWorkbook(xlsxFile, correctionFiles, capitalizationEnabled) {
+  if (!correctionFiles.length && !capitalizationEnabled) throw new Error("Choose one or more correction workbooks or enable the capitalization rule.");
   const xlsxBytes = new Uint8Array(await xlsxFile.arrayBuffer());
   const workbook = XLSX.read(xlsxBytes, { type: "array", cellFormula: false, cellStyles: true });
   const matrix = workbookMatrix(workbook);
-  const result = await applyCorrectionOptions(matrix, correctionFile, capitalizationEnabled);
+  const result = await applyCorrectionOptions(matrix, correctionFiles, capitalizationEnabled);
   writeWorkbookChanges(workbook, result.changes);
   const output = new Uint8Array(XLSX.write(workbook, { bookType: "xlsx", type: "array", compression: true }));
   downloadBytes(output, namedOutput(xlsxFile.name, "corrected", "xlsx"), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
@@ -698,12 +709,12 @@ async function rebuildArchive(templateBytes, matrix, onProgress) {
   };
 }
 
-async function createArchive(xlsxFile, referenceFile, correctionFile, capitalizationEnabled) {
+async function createArchive(xlsxFile, referenceFile, correctionFiles, capitalizationEnabled) {
   const xlsxBytes = new Uint8Array(await xlsxFile.arrayBuffer());
   const workbook = XLSX.read(xlsxBytes, { type: "array", cellFormula: false, cellStyles: false });
   const matrix = workbookMatrix(workbook);
   const metadata = readRoundTrip(workbook);
-  const corrections = await applyCorrectionOptions(matrix, correctionFile, capitalizationEnabled);
+  const corrections = await applyCorrectionOptions(matrix, correctionFiles, capitalizationEnabled);
 
   let templateBytes;
   if (metadata) templateBytes = metadata.zipBytes;
@@ -751,7 +762,7 @@ ui.xlsxButton.addEventListener("click", async () => {
     const result = await createArchive(
       file,
       ui.referenceInput.files[0] || null,
-      ui.correctionInput.files[0] || null,
+      Array.from(ui.correctionInput.files || []),
       ui.capitalizationRule.checked,
     );
     showStatus(ui.xlsxStatus, result.message, "success");
@@ -779,7 +790,7 @@ ui.correctedXlsxButton.addEventListener("click", async () => {
   try {
     const result = await createCorrectedWorkbook(
       file,
-      ui.correctionInput.files[0] || null,
+      Array.from(ui.correctionInput.files || []),
       ui.capitalizationRule.checked,
     );
     showStatus(ui.xlsxStatus, result.message, "success");

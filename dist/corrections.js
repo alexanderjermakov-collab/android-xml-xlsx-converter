@@ -35,7 +35,69 @@
     return [];
   }
 
+  function itemKey(value) {
+    if (value === null || value === undefined || value === "") return "";
+    return String(value);
+  }
+
+  function recordKey(app, id, item) {
+    return `${text(app)}\u001f${text(id)}\u001f${itemKey(item)}`;
+  }
+
+  function parseKeyedRules(matrix, translationHeaders) {
+    const headings = matrix[0] || [];
+    const appColumn = headerIndex(headings, ["App"]);
+    const idColumn = headerIndex(headings, ["string ID"]);
+    const itemColumn = headerIndex(headings, ["item ID"]);
+    if (appColumn < 0 || idColumn < 0 || itemColumn < 0) return null;
+
+    const pairs = [];
+    for (let column = 0; column < headings.length; column += 1) {
+      const match = /^\s*(values(?:-[^\s(]+)?)\s*\(original\)\s*$/i.exec(text(headings[column]));
+      if (!match) continue;
+      const language = translationHeaders.find((header) => header.toLocaleLowerCase() === match[1].toLocaleLowerCase());
+      if (!language) throw new Error(`Correction workbook targets missing language ${match[1]}.`);
+      const correctedColumn = headings.findIndex((heading) => {
+        const corrected = /^\s*(values(?:-[^\s(]+)?)\s*\(corrected\)\s*$/i.exec(text(heading));
+        return corrected && corrected[1].toLocaleLowerCase() === match[1].toLocaleLowerCase();
+      });
+      if (correctedColumn < 0) throw new Error(`Correction workbook is missing ${match[1]} (corrected).`);
+      pairs.push({ language, originalColumn: column, correctedColumn });
+    }
+    if (!pairs.length) return null;
+
+    const rules = [];
+    for (let rowIndex = 1; rowIndex < matrix.length; rowIndex += 1) {
+      const row = matrix[rowIndex] || [];
+      const app = text(row[appColumn]);
+      const id = text(row[idColumn]);
+      if (!app && !id && pairs.every((pair) => !text(row[pair.originalColumn]) && !text(row[pair.correctedColumn]))) continue;
+      if (!app || !id) throw new Error(`Correction row ${rowIndex + 1}: App and string ID are required.`);
+      for (const pair of pairs) {
+        const oldText = text(row[pair.originalColumn]);
+        const newText = text(row[pair.correctedColumn]);
+        if (!oldText && !newText) continue;
+        if (!oldText) throw new Error(`Correction row ${rowIndex + 1}: ${pair.language} (original) is empty.`);
+        if (!newText) throw new Error(`Correction row ${rowIndex + 1}: ${pair.language} (corrected) is empty.`);
+        rules.push({
+          kind: "keyed",
+          language: pair.language,
+          app,
+          id,
+          item: row[itemColumn],
+          oldText,
+          newText,
+          sourceRow: rowIndex + 1,
+        });
+      }
+    }
+    if (!rules.length) throw new Error("The correction workbook contains no correction rows.");
+    return rules;
+  }
+
   function parseRules(matrix, translationHeaders) {
+    const keyedRules = parseKeyedRules(matrix, translationHeaders);
+    if (keyedRules) return keyedRules;
     const headings = matrix[0] || [];
     const languageColumn = headerIndex(headings, ["Language", "Languages", "Language folder", "Values folder"]);
     const oldColumn = headerIndex(headings, ["Old text", "Current text", "Old", "Current"]);
@@ -63,7 +125,7 @@
         else if (token.trim()) unknown.push(token.trim());
       }
       if (unknown.length) throw new Error(`Correction row ${rowIndex + 1}: unknown language ${unknown.join(", ")}.`);
-      rules.push({ languages: [...new Set(languages)], oldText, newText, sourceRow: rowIndex + 1 });
+      rules.push({ kind: "text", languages: [...new Set(languages)], oldText, newText, sourceRow: rowIndex + 1 });
     }
     if (!rules.length) throw new Error("The correction workbook contains no replacement rows.");
     return rules;
@@ -72,26 +134,49 @@
   function applyRules(matrix, rules) {
     const headers = (matrix[0] || []).slice(3).map(text);
     const columnByLanguage = new Map(headers.map((header, index) => [header, index + 3]));
+    const rowByKey = new Map();
+    for (let row = 1; row < matrix.length; row += 1) {
+      const values = matrix[row] || [];
+      rowByKey.set(recordKey(values[0], values[1], values[2]), row);
+    }
     const changedCells = new Map();
     let replacements = 0;
     let matchedRules = 0;
+    let alreadyApplied = 0;
 
     for (const rule of rules) {
       let ruleMatches = 0;
-      for (const language of rule.languages) {
-        const column = columnByLanguage.get(language);
-        if (column === undefined) continue;
-        for (let row = 1; row < matrix.length; row += 1) {
-          if (text(matrix[row]?.[column]) !== rule.oldText) continue;
-          matrix[row][column] = rule.newText;
-          changedCells.set(`${row}:${column}`, { row, column, value: rule.newText });
-          replacements += 1;
-          ruleMatches += 1;
+      if (rule.kind === "keyed") {
+        const column = columnByLanguage.get(rule.language);
+        const row = rowByKey.get(recordKey(rule.app, rule.id, rule.item));
+        if (column !== undefined && row !== undefined) {
+          const current = text(matrix[row]?.[column]);
+          if (current === rule.oldText) {
+            matrix[row][column] = rule.newText;
+            changedCells.set(`${row}:${column}`, { row, column, value: rule.newText });
+            replacements += 1;
+            ruleMatches = 1;
+          } else if (current === rule.newText) {
+            alreadyApplied += 1;
+            ruleMatches = 1;
+          }
+        }
+      } else {
+        for (const language of rule.languages) {
+          const column = columnByLanguage.get(language);
+          if (column === undefined) continue;
+          for (let row = 1; row < matrix.length; row += 1) {
+            if (text(matrix[row]?.[column]) !== rule.oldText) continue;
+            matrix[row][column] = rule.newText;
+            changedCells.set(`${row}:${column}`, { row, column, value: rule.newText });
+            replacements += 1;
+            ruleMatches += 1;
+          }
         }
       }
       if (ruleMatches) matchedRules += 1;
     }
-    return { replacements, matchedRules, unmatchedRules: rules.length - matchedRules, changes: [...changedCells.values()] };
+    return { replacements, matchedRules, unmatchedRules: rules.length - matchedRules, alreadyApplied, changes: [...changedCells.values()] };
   }
 
   function firstLetter(value) {

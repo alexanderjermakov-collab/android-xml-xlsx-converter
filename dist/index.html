@@ -75,11 +75,11 @@
             <button class="text-button" id="correctionTemplateButton" type="button">Download template</button>
           </div>
           <label class="drop compact-drop" id="correctionDrop">
-            <input id="correctionInput" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet">
-            <span><strong>Correction workbook</strong>Columns: <code>Language</code>, <code>Old text</code>, <code>New text</code></span>
+            <input id="correctionInput" type="file" multiple accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet">
+            <span><strong>Choose one or more correction workbooks</strong>Use a separate correction file for each language</span>
             <span class="filename" id="correctionName"></span>
           </label>
-          <div class="correction-help"><code>Language</code> accepts one folder, several separated by commas or semicolons, or <code>all</code>.</div>
+          <div class="correction-help">Expected columns: <code>App</code>, <code>string ID</code>, <code>item ID</code>, <code>values</code>, <code>values-xx (original)</code>, <code>values-xx (corrected)</code>.</div>
           <label class="check-option">
             <input id="capitalizationRule" type="checkbox">
             <span><strong>Apply English capitalization rule</strong>If the English text starts with a capital letter, capitalize the first letter of every available translation.</span>

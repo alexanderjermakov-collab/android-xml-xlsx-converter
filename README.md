@@ -7,7 +7,7 @@ Fully client-side HTML converter for Android translation archives.
 - consolidated XLSX → ZIP while preserving the source archive hierarchy
 - visible workbook layout matches the supplied `All translations` reference
 - XLSX → ZIP always performs a full rebuild of every translation XML file, even when the workbook is unchanged
-- optional exact text replacements from a correction workbook
+- optional corrections from multiple language-specific workbooks
 - optional capitalization alignment: when English starts with a capital letter, each available translation does too
 - corrected XLSX can be downloaded before rebuilding the ZIP
 - files never leave the browser
@@ -21,15 +21,13 @@ Generated results are not restored from a browser cache: every click performs th
 
 ## Correction workbook
 
-Download the template from the application or create an XLSX whose first sheet contains these columns:
+Download the template from the application or create a separate XLSX for each language. Its first sheet must contain these columns:
 
-| Language | Old text | New text |
-| --- | --- | --- |
-| `values-sk` | complete current text | complete replacement text |
-| `values-sk; values-cs` | text shared by several languages | replacement for both languages |
-| `all` | text used in any language column | replacement in every matching column |
+| App | string ID | item ID | values | values-xx (original) | values-xx (corrected) |
+| --- | --- | --- | --- | --- | --- |
+| application name | resource identifier | array item or blank | English reference | complete current translation | complete corrected translation |
 
-Matching is exact and applies to complete cells. Language codes may be written as full Android folders such as `values-sk`, or as short codes such as `sk` when that column exists in the workbook.
+Replace `xx` in both language columns with the target qualifier, for example `values-cs (original)` and `values-cs (corrected)`. Corrections are matched by `App`, `string ID`, and `item ID`, and the current translation must exactly match the original value. Multiple correction files can be selected in one upload. The earlier `Language`, `Old text`, `New text` layout remains supported for compatibility.
 
 After selecting a ZIP, the converter scans its `values*` folders and displays a searchable language list. All languages are selected by default. Use **All**, **Clear**, or individual checkboxes to control which language columns are included in the consolidated workbook.
 

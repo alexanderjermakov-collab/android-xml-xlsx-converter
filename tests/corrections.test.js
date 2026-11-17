@@ -34,4 +34,27 @@ assert.equal(matrix[4][4], "malé");
 assert.equal(engine.isUppercaseStart("…Hello"), true);
 assert.equal(engine.uppercaseFirstLetter("(hello)", "en"), "(Hello)");
 
+const keyedMatrix = [
+  ["App", "string ID", "item ID", "values", "values-sk", "values-cs"],
+  ["ATVInput", "choice", 2, "Development only", "Development only", "Pouze pro vývoj"],
+  ["ATVInput", "shared", null, "Shared", "rovnaké", "stejné"],
+];
+const slovakFile = [
+  ["App", "string ID", "item ID", "values", "values-sk (original)", "values-sk (corrected)"],
+  ["ATVInput", "choice", 2, "Development only", "Development only", "Iba na vývoj"],
+];
+const czechFile = [
+  ["App", "string ID", "item ID", "values", "values-cs (original)", "values-cs (corrected)"],
+  ["ATVInput", "shared", null, "Shared", "stejné", "shodné"],
+];
+const keyedRules = [
+  ...engine.parseRules(slovakFile, keyedMatrix[0].slice(3)),
+  ...engine.parseRules(czechFile, keyedMatrix[0].slice(3)),
+];
+const keyedResult = engine.applyRules(keyedMatrix, keyedRules);
+assert.equal(keyedResult.replacements, 2);
+assert.equal(keyedResult.unmatchedRules, 0);
+assert.equal(keyedMatrix[1][4], "Iba na vývoj");
+assert.equal(keyedMatrix[2][5], "shodné");
+
 console.log("correction engine tests passed");
