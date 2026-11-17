@@ -1,4 +1,4 @@
-# Google TV Language files XML-XLS-XML Converter
+# Google TV RTK. Language files ZIP((XML)-XLSX-ZIP(XML) convertor
 
 Fully client-side HTML converter for Android translation archives.
 
