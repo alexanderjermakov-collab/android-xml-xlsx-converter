@@ -3,6 +3,8 @@
 
 const ROUNDTRIP_SHEET = "_RoundTrip";
 const ROUNDTRIP_MARKER = "ANDROID_XML_XLSX_CONVERTER_V1";
+const RESOURCE_MAP_SHEET = "_ResourceMap";
+const RESOURCE_MAP_MARKER = "ANDROID_XML_RESOURCE_MAP_V2";
 const SHEET_NAME = "All translations";
 const CHUNK_SIZE = 30000;
 const textEncoder = new TextEncoder();
@@ -271,6 +273,21 @@ function rowKey(app, id, item) {
   return `${app}\u001f${id}\u001f${canonicalItem(item)}`;
 }
 
+function resourcePathTemplate(path, valuesDir) {
+  const needle = `/${valuesDir}/`;
+  const position = path.lastIndexOf(needle);
+  if (position < 0) return path;
+  return `${path.slice(0, position)}/{values}/${path.slice(position + needle.length)}`;
+}
+
+function resourceIdentityKey(templatePath, resourceType, id, item) {
+  return JSON.stringify([templatePath, resourceType, String(id), item === null || item === undefined ? null : String(item)]);
+}
+
+function resourcePathForColumn(templatePath, column, variant) {
+  return templatePath.replace("/{values}/", `/${targetValuesDir(column, variant)}/`);
+}
+
 async function matrixSignature(matrix) {
   const parts = [];
   for (let row = 0; row < matrix.length; row += 1) {
@@ -419,8 +436,8 @@ function directChildren(element, localName) {
   return Array.from(element.children).filter((child) => child.localName === localName);
 }
 
-function groupKey(app, id, variant) {
-  return `${app}\u001f${id}\u001f${variant || ""}`;
+function groupKey(templatePath, resourceType, id, variant) {
+  return resourceIdentityKey(templatePath, resourceType, id, variant || null);
 }
 
 async function extractArchive(zipBytes, selectedColumns, onProgress) {
@@ -446,15 +463,15 @@ async function extractArchive(zipBytes, selectedColumns, onProgress) {
     for (const element of Array.from(resources.children)) {
       const id = element.getAttribute("name");
       if (!id) continue;
-      const key = groupKey(info.app, id, info.variant);
-      let group = groups.get(key);
-      if (!group) {
-        group = { app: info.app, id, variant: info.variant, isArray: false, items: [] };
-        groups.set(key, group);
-      }
       const isArrayFile = info.filename === "arrays.xml" || info.filename === "strings.xml";
       if (element.localName === "string-array" && isArrayFile) {
-        group.isArray = true;
+        const templatePath = resourcePathTemplate(entry.name, info.valuesDir);
+        const key = groupKey(templatePath, "string-array", id, info.variant);
+        let group = groups.get(key);
+        if (!group) {
+          group = { app: info.app, id, variant: info.variant, templatePath, resourceType: "string-array", isArray: true, items: [] };
+          groups.set(key, group);
+        }
         const items = directChildren(element, "item");
         items.forEach((item, index) => {
           group.items[index] ||= new Map();
@@ -464,6 +481,13 @@ async function extractArchive(zipBytes, selectedColumns, onProgress) {
         element.localName === "string" &&
         (info.filename.startsWith("strings") || info.filename.endsWith("strings.xml"))
       ) {
+        const templatePath = resourcePathTemplate(entry.name, info.valuesDir);
+        const key = groupKey(templatePath, "string", id, info.variant);
+        let group = groups.get(key);
+        if (!group) {
+          group = { app: info.app, id, variant: info.variant, templatePath, resourceType: "string", isArray: false, items: [] };
+          groups.set(key, group);
+        }
         group.items[0] ||= new Map();
         group.items[0].set(info.column, element.textContent || null);
       }
@@ -535,16 +559,84 @@ async function archiveRecords(file, label, onProgress) {
   return { records, xmlFiles: entries.length };
 }
 
+function auditEntryForRow(row, modifications) {
+  if (row.auditKey && modifications.has(row.auditKey)) return modifications.get(row.auditKey);
+  const exactKey = archiveRecordKey(row.xmlPath, row.resourceType, row.id, row.item);
+  return modifications.get(exactKey) || modifications.get(legacyModificationKey(row.app, row.id, row.item, row.language)) || null;
+}
+
 function differenceConclusion(row, modifications) {
   if (row.status === "Only in source") return "Removed from output ZIP";
   if (row.status === "Only in output") return "Added to output ZIP";
-  const reasons = modifications.get(modificationKey(row.app, row.id, row.item, row.language));
-  return reasons?.length ? reasons.join("; ") : "Modified value (reason not recorded in this browser session)";
+  const audit = auditEntryForRow(row, modifications);
+  return audit?.reasons?.length ? audit.reasons.join("; ") : "Modified value (reason not recorded in this browser session)";
+}
+
+function correctionEvaluation(audit, outputRecord) {
+  const checks = audit?.checks || [];
+  const expectedValues = new Set(checks.map((check) => String(check.expectedValue ?? "")));
+  const conflict = expectedValues.size > 1;
+  const results = checks.map((check) => {
+    let status;
+    if (check.targetMissing) status = "TARGET NOT FOUND";
+    else if (!outputRecord) status = "MISSING OUTPUT";
+    else if (String(outputRecord.value ?? "") === String(check.expectedValue ?? "")) status = "MATCH";
+    else status = "MISMATCH";
+    return { ...check, status };
+  });
+  let status = "NOT REQUESTED";
+  if (checks.length) {
+    if (conflict) status = "CONFLICT";
+    else if (results.some((check) => check.status === "TARGET NOT FOUND")) status = "TARGET NOT FOUND";
+    else if (results.every((check) => check.status === "MATCH")) status = "MATCH";
+    else if (results.some((check) => check.status === "MISSING OUTPUT")) status = "MISSING OUTPUT";
+    else status = "MISMATCH";
+  }
+  return { checks, results, conflict, status };
+}
+
+function perLanguageStatistics(sourceArchive, outputArchive, modifications) {
+  const stats = new Map();
+  const ensure = (language) => {
+    if (!stats.has(language)) stats.set(language, {
+      language, total: 0, matched: 0, changed: 0, onlySource: 0, onlyOutput: 0,
+      correctionTargets: 0, correctionChecks: 0, verified: 0, mismatched: 0,
+      missing: 0, unmatched: 0, conflicts: 0, capitalization: 0,
+    });
+    return stats.get(language);
+  };
+  const keys = new Set([...sourceArchive.records.keys(), ...outputArchive.records.keys()]);
+  for (const key of keys) {
+    const source = sourceArchive.records.get(key);
+    const output = outputArchive.records.get(key);
+    const row = ensure((source || output).language);
+    row.total += 1;
+    if (source && output && String(source.value ?? "") === String(output.value ?? "")) row.matched += 1;
+    else if (source && output) row.changed += 1;
+    else if (source) row.onlySource += 1;
+    else row.onlyOutput += 1;
+  }
+  for (const [key, audit] of modifications) {
+    const row = ensure(audit.language || "unknown");
+    const evaluation = correctionEvaluation(audit, outputArchive.records.get(key));
+    if (evaluation.checks.length) {
+      if (!evaluation.checks.every((check) => check.targetMissing)) row.correctionTargets += 1;
+      row.correctionChecks += evaluation.checks.length;
+      row.verified += evaluation.results.filter((check) => check.status === "MATCH").length;
+      row.mismatched += evaluation.results.filter((check) => check.status === "MISMATCH").length;
+      row.missing += evaluation.results.filter((check) => check.status === "MISSING OUTPUT").length;
+      row.unmatched += evaluation.results.filter((check) => check.status === "TARGET NOT FOUND").length;
+      if (evaluation.conflict) row.conflicts += 1;
+    }
+    if (audit.reasons?.includes("Capitalization")) row.capitalization += 1;
+  }
+  return [...stats.values()].sort((left, right) => left.language.localeCompare(right.language));
 }
 
 function diffWorkbook(sourceFile, outputFile, sourceArchive, outputArchive, result, modifications) {
   const workbook = XLSX.utils.book_new();
   const matchRate = result.total ? result.matched / result.total : 1;
+  const languageStats = perLanguageStatistics(sourceArchive, outputArchive, modifications);
   const summaryRows = [
     ["ZIP translation comparison", null],
     ["Source ZIP", sourceFile.name],
@@ -563,12 +655,38 @@ function diffWorkbook(sourceFile, outputFile, sourceArchive, outputArchive, resu
     ["Output translation rows", outputArchive.records.size],
     ["Source translation XML files", sourceArchive.xmlFiles],
     ["Output translation XML files", outputArchive.xmlFiles],
+    [null, null],
+    ["Statistics by language"],
+    [
+      "Language", "Total rows", "Matching", "Different", "Changed", "Only in source", "Only in output", "Match rate",
+      "Correction targets", "Correction checks", "Verified checks", "Mismatched checks", "Missing checks", "Unmatched correction rules", "Conflicts", "Capitalization changes",
+    ],
+    ...languageStats.map((row) => {
+      const different = row.changed + row.onlySource + row.onlyOutput;
+      return [
+        row.language, row.total, row.matched, different, row.changed, row.onlySource, row.onlyOutput,
+        row.total ? row.matched / row.total : 1,
+        row.correctionTargets, row.correctionChecks, row.verified, row.mismatched, row.missing, row.unmatched, row.conflicts, row.capitalization,
+      ];
+    }),
   ];
   const summarySheet = XLSX.utils.aoa_to_sheet(summaryRows);
-  summarySheet["!cols"] = [{ wch: 34 }, { wch: 72 }];
+  summarySheet["!cols"] = [
+    { wch: 34 }, { wch: 18 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 16 }, { wch: 16 }, { wch: 14 },
+    { wch: 18 }, { wch: 18 }, { wch: 17 }, { wch: 19 }, { wch: 16 }, { wch: 26 }, { wch: 12 }, { wch: 22 },
+  ];
   if (summarySheet.B13) summarySheet.B13.z = "0.0%";
+  const languageHeaderIndex = 19;
+  for (let row = languageHeaderIndex + 1; row < summaryRows.length; row += 1) {
+    const address = XLSX.utils.encode_cell({ r: row, c: 7 });
+    if (summarySheet[address]) summarySheet[address].z = "0.0%";
+  }
+  summarySheet["!autofilter"] = { ref: `A${languageHeaderIndex + 1}:P${Math.max(languageHeaderIndex + 1, summaryRows.length)}` };
   XLSX.utils.book_append_sheet(workbook, summarySheet, "Summary");
 
+  const correctionLanguages = [...new Set([...modifications.values()].flatMap((entry) =>
+    (entry.checks || []).map((check) => check.language)
+  ))].sort((left, right) => left.localeCompare(right));
   const differenceRows = [[
     "Status",
     "App",
@@ -581,9 +699,47 @@ function diffWorkbook(sourceFile, outputFile, sourceArchive, outputArchive, resu
     "Source value",
     "Output value",
     "Conclusion",
+    ...correctionLanguages.flatMap((language) => [
+      `${language} correction source`,
+      `${language} correction original value`,
+      `${language} expected corrected value`,
+      `${language} verification`,
+    ]),
   ]];
+  const reportRows = new Map();
   result.differences.forEach((row) => {
+    reportRows.set(archiveRecordKey(row.xmlPath, row.resourceType, row.id, row.item), row);
+  });
+  for (const [key, audit] of modifications) {
+    if (!(audit.checks || []).length || reportRows.has(key)) continue;
+    const source = sourceArchive.records.get(key);
+    const output = outputArchive.records.get(key);
+    const evaluation = correctionEvaluation(audit, output);
+    reportRows.set(key, {
+      status: evaluation.status === "MATCH" ? "Correction verified" :
+        (evaluation.status === "TARGET NOT FOUND" ? "Correction target not found" : "Correction check failed"),
+      auditKey: key,
+      app: audit.app,
+      language: audit.language,
+      xmlPath: audit.xmlPath,
+      filename: audit.filename,
+      resourceType: audit.resourceType,
+      id: audit.id,
+      item: audit.item,
+      sourceValue: source ? String(source.value ?? "") : null,
+      outputValue: output ? String(output.value ?? "") : null,
+    });
+  }
+  [...reportRows.values()].sort((left, right) => [
+    left.app, left.language, left.xmlPath, left.id, String(left.item ?? ""), left.status,
+  ].join("\u001f").localeCompare([
+    right.app, right.language, right.xmlPath, right.id, String(right.item ?? ""), right.status,
+  ].join("\u001f"))).forEach((row) => {
     row.conclusion = differenceConclusion(row, modifications);
+    const audit = auditEntryForRow(row, modifications);
+    const outputRecord = row.auditKey ? outputArchive.records.get(row.auditKey) :
+      outputArchive.records.get(archiveRecordKey(row.xmlPath, row.resourceType, row.id, row.item));
+    const evaluation = correctionEvaluation(audit, outputRecord);
     differenceRows.push([
       row.status,
       row.app,
@@ -596,14 +752,25 @@ function diffWorkbook(sourceFile, outputFile, sourceArchive, outputArchive, resu
       row.sourceValue,
       row.outputValue,
       row.conclusion,
+      ...correctionLanguages.flatMap((language) => {
+        if (!audit || audit.language !== language || !evaluation.checks.length) return [null, null, null, null];
+        return [
+          evaluation.checks.map((check) => `${check.file} (row ${check.sourceRow})`).join("\n"),
+          evaluation.checks.map((check) => `${check.file}: ${check.originalValue}`).join("\n"),
+          evaluation.checks.map((check) => `${check.file}: ${check.expectedValue}`).join("\n"),
+          evaluation.results.map((check) => `${check.file}: ${check.status}`).join("\n") + (evaluation.conflict ? "\nConflicting expected values" : ""),
+        ];
+      }),
     ]);
   });
   const differencesSheet = XLSX.utils.aoa_to_sheet(differenceRows);
   differencesSheet["!cols"] = [
     { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 64 }, { wch: 20 },
     { wch: 16 }, { wch: 40 }, { wch: 12 }, { wch: 64 }, { wch: 64 }, { wch: 56 },
+    ...correctionLanguages.flatMap(() => [{ wch: 38 }, { wch: 54 }, { wch: 54 }, { wch: 32 }]),
   ];
-  differencesSheet["!autofilter"] = { ref: `A1:K${Math.max(1, differenceRows.length)}` };
+  const lastColumn = XLSX.utils.encode_col(differenceRows[0].length - 1);
+  differencesSheet["!autofilter"] = { ref: `A1:${lastColumn}${Math.max(1, differenceRows.length)}` };
   XLSX.utils.book_append_sheet(workbook, differencesSheet, "Differences");
   return workbook;
 }
@@ -632,24 +799,37 @@ function flattenGroups(groups) {
       let item = null;
       if (group.variant) item = group.isArray ? `${index}${group.variant}` : group.variant;
       else if (group.isArray) item = index;
-      rows.push({ app: group.app, id: group.id, item, values });
+      rows.push({
+        app: group.app,
+        id: group.id,
+        item,
+        values,
+        templatePath: group.templatePath,
+        resourceType: group.resourceType,
+        variant: group.variant,
+      });
     });
   }
   return rows;
 }
 
 function orderRows(rows, schema) {
-  const byKey = new Map(rows.map((row) => [rowKey(row.app, row.id, row.item), row]));
+  const byKey = new Map();
+  rows.forEach((row) => {
+    const key = rowKey(row.app, row.id, row.item);
+    if (!byKey.has(key)) byKey.set(key, []);
+    byKey.get(key).push(row);
+  });
   const ordered = [];
   for (const [app, id, item] of schema.rows) {
     const key = rowKey(app, id, item);
-    const row = byKey.get(key);
-    if (row) {
-      ordered.push(row);
-      byKey.delete(key);
+    const bucket = byKey.get(key);
+    if (bucket?.length) {
+      ordered.push(bucket.shift());
+      if (!bucket.length) byKey.delete(key);
     }
   }
-  ordered.push(...byKey.values());
+  for (const bucket of byKey.values()) ordered.push(...bucket);
   return ordered;
 }
 
@@ -683,6 +863,50 @@ function makeRoundTripSheet(filename, signature, zipBytes) {
   ]);
 }
 
+function makeResourceMapSheet(rows) {
+  return XLSX.utils.aoa_to_sheet([
+    ["marker", RESOURCE_MAP_MARKER],
+    ["worksheet row", "App", "string ID", "item ID", "XML path template", "Resource type", "Variant"],
+    ...rows.map((row, index) => [
+      index + 2,
+      row.app,
+      row.id,
+      row.item,
+      row.templatePath,
+      row.resourceType,
+      row.variant || null,
+    ]),
+  ]);
+}
+
+function readResourceMap(workbook, matrix) {
+  const sheet = workbook.Sheets[RESOURCE_MAP_SHEET];
+  if (!sheet) return null;
+  const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true, defval: null });
+  if (rows[0]?.[1] !== RESOURCE_MAP_MARKER) return null;
+  const result = new Map();
+  for (let index = 2; index < rows.length; index += 1) {
+    const source = rows[index] || [];
+    const matrixIndex = Number(source[0]) - 1;
+    const visible = matrix[matrixIndex] || [];
+    if (!Number.isInteger(matrixIndex) || matrixIndex < 1) continue;
+    if (String(visible[0] ?? "") !== String(source[1] ?? "") ||
+        String(visible[1] ?? "") !== String(source[2] ?? "") ||
+        canonicalItem(visible[2]) !== canonicalItem(source[3])) {
+      throw new Error(`The hidden resource map no longer matches worksheet row ${matrixIndex + 1}. Regenerate the XLSX instead of sorting its rows.`);
+    }
+    result.set(matrixIndex, {
+      app: String(source[1]),
+      id: String(source[2]),
+      item: visible[2],
+      templatePath: String(source[4]),
+      resourceType: String(source[5]),
+      variant: source[6] ? String(source[6]) : null,
+    });
+  }
+  return result;
+}
+
 function translationSheetName(workbook) {
   return workbook.SheetNames.includes(SHEET_NAME) ? SHEET_NAME : workbook.SheetNames[0];
 }
@@ -710,18 +934,25 @@ async function correctionRules(file, translationHeaders) {
 async function applyCorrectionOptions(matrix, correctionFiles, capitalizationEnabled) {
   const headers = (matrix[0] || []).slice(3).map(String);
   const changes = new Map();
-  const addChange = (change, reason) => {
+  const addChange = (change, reason, correctionCheck = null) => {
     const key = `${change.row}:${change.column}`;
     const existing = changes.get(key);
     const reasons = new Set(existing?.reasons || []);
     reasons.add(reason);
-    changes.set(key, { ...change, reasons: [...reasons] });
+    const correctionChecks = [...(existing?.correctionChecks || [])];
+    if (correctionCheck && !correctionChecks.some((check) =>
+      check.file === correctionCheck.file &&
+      check.sourceRow === correctionCheck.sourceRow &&
+      check.language === correctionCheck.language
+    )) correctionChecks.push(correctionCheck);
+    changes.set(key, { ...existing, ...change, reasons: [...reasons], correctionChecks });
   };
   let replacements = 0;
   let matchedRules = 0;
   let unmatchedRules = 0;
   let alreadyApplied = 0;
   let capitalized = 0;
+  const unmatchedChecks = [];
 
   for (const correctionFile of correctionFiles) {
     let rules;
@@ -736,8 +967,33 @@ async function applyCorrectionOptions(matrix, correctionFiles, capitalizationEna
     unmatchedRules += result.unmatchedRules;
     alreadyApplied += result.alreadyApplied || 0;
     result.changes.forEach((change) => {
-      addChange(change, `Correction file: ${correctionFile.name} (${change.language || headers[change.column - 3]})`);
+      const language = change.language || headers[change.column - 3];
+      addChange(
+        change,
+        `Correction file: ${correctionFile.name} (${language})`,
+        {
+          file: correctionFile.name,
+          language,
+          sourceRow: change.sourceRow,
+          originalValue: change.oldText,
+          expectedValue: change.newText ?? change.value,
+        },
+      );
     });
+    for (const rule of result.unmatchedRuleDetails || []) {
+      const languages = rule.kind === "keyed" ? [rule.language] : rule.languages;
+      for (const language of languages) unmatchedChecks.push({
+        file: correctionFile.name,
+        language,
+        sourceRow: rule.sourceRow,
+        originalValue: rule.oldText,
+        expectedValue: rule.newText,
+        app: rule.app || "",
+        id: rule.id || "",
+        item: rule.item,
+        targetMissing: true,
+      });
+    }
   }
   if (capitalizationEnabled) {
     const result = CorrectionEngine.applyCapitalization(matrix);
@@ -751,25 +1007,63 @@ async function applyCorrectionOptions(matrix, correctionFiles, capitalizationEna
     unmatchedRules,
     alreadyApplied,
     capitalized,
+    unmatchedChecks,
     changes: [...changes.values()],
   };
 }
 
-function modificationKey(app, id, item, language) {
+function legacyModificationKey(app, id, item, language) {
   const itemValue = item === null || item === undefined || item === "" ? "" : String(item);
-  return `${String(app)}\u001f${String(id)}\u001f${itemValue}\u001f${String(language)}`;
+  return `legacy:${String(app)}\u001f${String(id)}\u001f${itemValue}\u001f${String(language)}`;
 }
 
-function modificationAudit(matrix, changes, existing = new Map()) {
+function modificationAudit(matrix, changes, existing = new Map(), resourceMap = null, unmatchedChecks = []) {
   const audit = new Map(existing);
   const headers = (matrix[0] || []).slice(3).map(String);
   for (const change of changes) {
     const row = matrix[change.row] || [];
     const language = change.language || headers[change.column - 3];
-    const key = modificationKey(row[0], row[1], row[2], language);
-    const reasons = new Set(audit.get(key) || []);
+    const identity = resourceMap?.get(change.row) || null;
+    const xmlPath = identity ? resourcePathForColumn(identity.templatePath, language, identity.variant) : null;
+    const key = identity
+      ? archiveRecordKey(xmlPath, identity.resourceType, identity.id, identity.item)
+      : legacyModificationKey(row[0], row[1], row[2], language);
+    const previous = audit.get(key) || {};
+    const reasons = new Set(previous.reasons || []);
     (change.reasons || []).forEach((reason) => reasons.add(reason));
-    audit.set(key, [...reasons]);
+    const checks = [...(previous.checks || [])];
+    for (const check of change.correctionChecks || []) {
+      if (!checks.some((current) => current.file === check.file && current.sourceRow === check.sourceRow && current.language === check.language)) {
+        checks.push(check);
+      }
+    }
+    audit.set(key, {
+      key,
+      app: String(row[0] ?? ""),
+      id: String(row[1] ?? ""),
+      item: row[2],
+      language,
+      xmlPath,
+      filename: xmlPath ? xmlPath.split("/").pop() : "",
+      resourceType: identity?.resourceType || "",
+      reasons: [...reasons],
+      checks,
+    });
+  }
+  for (const check of unmatchedChecks) {
+    const key = `unmatched:${check.file}\u001f${check.sourceRow}\u001f${check.language}`;
+    audit.set(key, {
+      key,
+      app: check.app,
+      id: check.id,
+      item: check.item,
+      language: check.language,
+      xmlPath: "",
+      filename: "",
+      resourceType: "",
+      reasons: [`Correction rule did not match any workbook row: ${check.file} (${check.language})`],
+      checks: [check],
+    });
   }
   return audit;
 }
@@ -814,8 +1108,9 @@ async function createCorrectedWorkbook(xlsxFile, correctionFiles, capitalization
   const xlsxBytes = new Uint8Array(await xlsxFile.arrayBuffer());
   const workbook = XLSX.read(xlsxBytes, { type: "array", cellFormula: false, cellStyles: true });
   const matrix = workbookMatrix(workbook);
+  const resourceMap = readResourceMap(workbook, matrix);
   const result = await applyCorrectionOptions(matrix, correctionFiles, capitalizationEnabled);
-  const audit = modificationAudit(matrix, result.changes, pipeline.activeModifications);
+  const audit = modificationAudit(matrix, result.changes, pipeline.activeModifications, resourceMap, result.unmatchedChecks);
   writeWorkbookChanges(workbook, result.changes);
   const output = new Uint8Array(XLSX.write(workbook, { bookType: "xlsx", type: "array", compression: true }));
   const filename = namedOutput(xlsxFile.name, "corrected", "xlsx");
@@ -867,7 +1162,12 @@ async function createWorkbook(zipFile, selectedColumns) {
   sheet["!cols"] = [{ wch: 9 }, { wch: 38 }, { wch: 12 }, ...headers.map(() => ({ wch: 28 }))];
   XLSX.utils.book_append_sheet(workbook, sheet, SHEET_NAME);
   XLSX.utils.book_append_sheet(workbook, makeRoundTripSheet(zipFile.name, signature, zipBytes), ROUNDTRIP_SHEET);
-  workbook.Workbook = { Sheets: [{ name: SHEET_NAME, Hidden: 0 }, { name: ROUNDTRIP_SHEET, Hidden: 2 }] };
+  XLSX.utils.book_append_sheet(workbook, makeResourceMapSheet(rows), RESOURCE_MAP_SHEET);
+  workbook.Workbook = { Sheets: [
+    { name: SHEET_NAME, Hidden: 0 },
+    { name: ROUNDTRIP_SHEET, Hidden: 2 },
+    { name: RESOURCE_MAP_SHEET, Hidden: 2 },
+  ] };
   const workbookBytes = new Uint8Array(XLSX.write(workbook, { bookType: "xlsx", type: "array", compression: true }));
   const filename = outputName(zipFile.name, "xlsx");
   downloadBytes(workbookBytes, filename, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
@@ -880,15 +1180,20 @@ async function createWorkbook(zipFile, selectedColumns) {
   };
 }
 
-function workbookData(matrix) {
+function workbookData(matrix, resourceMap) {
   const headers = (matrix[0] || []).slice(3).map(String);
   const records = new Map();
   for (let index = 1; index < matrix.length; index += 1) {
     const row = matrix[index] || [];
     if (row[0] === null || row[1] === null || row[0] === undefined || row[1] === undefined) continue;
-    records.set(rowKey(String(row[0]), String(row[1]), row[2]), { row, index });
+    const identity = resourceMap?.get(index) || null;
+    const key = identity
+      ? resourceIdentityKey(identity.templatePath, identity.resourceType, identity.id, identity.item)
+      : rowKey(String(row[0]), String(row[1]), row[2]);
+    if (records.has(key)) throw new Error(`Duplicate workbook resource at worksheet row ${index + 1}.`);
+    records.set(key, { row, index, identity });
   }
-  return { headers, records };
+  return { headers, records, mapped: Boolean(resourceMap) };
 }
 
 function nonBlank(value) {
@@ -914,9 +1219,9 @@ function replaceValuesDir(path, current, target) {
   return `${path.slice(0, position)}/${target}/${path.slice(position + needle.length)}`;
 }
 
-async function rebuildArchive(templateBytes, matrix, onProgress) {
+async function rebuildArchive(templateBytes, matrix, resourceMap, onProgress) {
   const zip = await JSZip.loadAsync(templateBytes);
-  const workbook = workbookData(matrix);
+  const workbook = workbookData(matrix, resourceMap);
   const columnIndex = new Map(workbook.headers.map((header, index) => [header, index + 3]));
   const seen = new Set();
   const definitions = new Map();
@@ -940,10 +1245,18 @@ async function rebuildArchive(templateBytes, matrix, onProgress) {
         const items = directChildren(element, "item");
         items.forEach((item, itemIndex) => {
           const itemValue = info.variant ? `${itemIndex}${info.variant}` : itemIndex;
-          const key = rowKey(info.app, id, itemValue);
+          const templatePath = resourcePathTemplate(entry.name, info.valuesDir);
+          const key = workbook.mapped
+            ? resourceIdentityKey(templatePath, "string-array", id, itemValue)
+            : rowKey(info.app, id, itemValue);
+          if (!workbook.mapped && definitions.has(key) &&
+              (definitions.get(key).templatePath !== templatePath || definitions.get(key).kind !== "array")) {
+            throw new Error(`Legacy workbook mapping is ambiguous for ${info.app} / ${id} / item ${itemValue}. Regenerate the XLSX with this converter before rebuilding the ZIP.`);
+          }
           definitions.set(key, {
             kind: "array",
             sourcePath: entry.name,
+            templatePath,
             info,
             parentAttributes: cloneAttributes(element),
             itemAttributes: cloneAttributes(item),
@@ -955,28 +1268,42 @@ async function rebuildArchive(templateBytes, matrix, onProgress) {
           const value = record && column !== undefined ? record.row[column] : null;
           if (nonBlank(value)) {
             const workbookValue = String(value);
-            if (workbookValue !== item.textContent) changes += 1;
-            item.textContent = workbookValue;
-            state.changed = true;
+            if (workbookValue !== item.textContent) {
+              changes += 1;
+              item.textContent = workbookValue;
+              state.changed = true;
+            }
           }
         });
       } else if (
         element.localName === "string" &&
         (info.filename.startsWith("strings") || info.filename.endsWith("strings.xml"))
       ) {
-        const numericKey = rowKey(info.app, id, 0);
-        const itemValue = info.variant ? info.variant : (workbook.records.has(numericKey) ? 0 : null);
-        const key = rowKey(info.app, id, itemValue);
-        definitions.set(key, { kind: "string", sourcePath: entry.name, info, attributes: cloneAttributes(element) });
+        const itemValue = info.variant || null;
+        const templatePath = resourcePathTemplate(entry.name, info.valuesDir);
+        let key = workbook.mapped
+          ? resourceIdentityKey(templatePath, "string", id, itemValue)
+          : rowKey(info.app, id, itemValue);
+        if (!workbook.mapped && !workbook.records.has(key) && !info.variant) {
+          const numericKey = rowKey(info.app, id, 0);
+          if (workbook.records.has(numericKey)) key = numericKey;
+        }
+        if (!workbook.mapped && definitions.has(key) &&
+            (definitions.get(key).templatePath !== templatePath || definitions.get(key).kind !== "string")) {
+          throw new Error(`Legacy workbook mapping is ambiguous for ${info.app} / ${id}. Regenerate the XLSX with this converter before rebuilding the ZIP.`);
+        }
+        definitions.set(key, { kind: "string", sourcePath: entry.name, templatePath, info, attributes: cloneAttributes(element) });
         seen.add(`${key}\u001f${info.column}`);
         const record = workbook.records.get(key);
         const column = columnIndex.get(info.column);
         const value = record && column !== undefined ? record.row[column] : null;
         if (nonBlank(value)) {
           const workbookValue = String(value);
-          if (workbookValue !== element.textContent) changes += 1;
-          element.textContent = workbookValue;
-          state.changed = true;
+          if (workbookValue !== element.textContent) {
+            changes += 1;
+            element.textContent = workbookValue;
+            state.changed = true;
+          }
         }
       }
     }
@@ -993,7 +1320,9 @@ async function rebuildArchive(templateBytes, matrix, onProgress) {
       const value = record.row[matrixColumn];
       if (!nonBlank(value) || seen.has(`${key}\u001f${columnName}`)) continue;
       const targetDir = targetValuesDir(columnName, definition.info.variant);
-      const targetPath = replaceValuesDir(definition.sourcePath, definition.info.valuesDir, targetDir);
+      const targetPath = definition.templatePath
+        ? resourcePathForColumn(definition.templatePath, columnName, definition.info.variant)
+        : replaceValuesDir(definition.sourcePath, definition.info.valuesDir, targetDir);
       if (!targetPath) continue;
       let state = documents.get(targetPath);
       if (!state) {
@@ -1032,10 +1361,22 @@ async function rebuildArchive(templateBytes, matrix, onProgress) {
   const serializer = new XMLSerializer();
   let rewrittenDocuments = 0;
   for (const [path, state] of documents) {
+    if (!state.changed) continue;
     let xml = serializer.serializeToString(state.documentNode);
     if (!xml.startsWith("<?xml")) xml = `<?xml version="1.0" encoding="utf-8"?>\n${xml}`;
     zip.file(path, xml);
     rewrittenDocuments += 1;
+  }
+  if (changes === 0) {
+    return {
+      output: templateBytes.slice(),
+      changes,
+      rewrittenDocuments: 0,
+      validatedDocuments: entries.length,
+      processedRows: workbook.records.size,
+      languageCount: workbook.headers.filter((header) => header !== "values").length,
+      exact: true,
+    };
   }
   const output = await zip.generateAsync(
     { type: "uint8array", compression: "DEFLATE", compressionOptions: { level: 6 } },
@@ -1045,8 +1386,10 @@ async function rebuildArchive(templateBytes, matrix, onProgress) {
     output,
     changes,
     rewrittenDocuments,
+    validatedDocuments: entries.length,
     processedRows: workbook.records.size,
     languageCount: workbook.headers.filter((header) => header !== "values").length,
+    exact: false,
   };
 }
 
@@ -1054,23 +1397,24 @@ async function createArchive(xlsxFile, referenceFile, correctionFiles, capitaliz
   const xlsxBytes = new Uint8Array(await xlsxFile.arrayBuffer());
   const workbook = XLSX.read(xlsxBytes, { type: "array", cellFormula: false, cellStyles: false });
   const matrix = workbookMatrix(workbook);
+  const resourceMap = readResourceMap(workbook, matrix);
   const metadata = readRoundTrip(workbook);
   const corrections = await applyCorrectionOptions(matrix, correctionFiles, capitalizationEnabled);
-  const audit = modificationAudit(matrix, corrections.changes, pipeline.activeModifications);
+  const audit = modificationAudit(matrix, corrections.changes, pipeline.activeModifications, resourceMap, corrections.unmatchedChecks);
 
   let templateBytes;
   if (metadata) templateBytes = metadata.zipBytes;
   else if (referenceFile) templateBytes = new Uint8Array(await referenceFile.arrayBuffer());
   else throw new Error("This legacy workbook has no embedded archive. Select its source ZIP under “Reference ZIP”.");
 
-  const rebuilt = await rebuildArchive(templateBytes, matrix, (message) => showStatus(ui.xlsxStatus, message));
+  const rebuilt = await rebuildArchive(templateBytes, matrix, resourceMap, (message) => showStatus(ui.xlsxStatus, message));
   const filename = outputName(xlsxFile.name, "zip");
   downloadBytes(rebuilt.output, filename, "application/zip");
   const outputFile = browserFile(rebuilt.output, filename, "application/zip");
   setOutputZip(outputFile, audit);
   return {
-    message: `ZIP created and selected for comparison: ${rebuilt.processedRows.toLocaleString()} rows, ${rebuilt.languageCount.toLocaleString()} languages, ${rebuilt.rewrittenDocuments.toLocaleString()} XML files. Corrections: ${correctionSummary(corrections)}.`,
-    exact: false,
+    message: `ZIP created and selected for comparison: ${rebuilt.processedRows.toLocaleString()} rows, ${rebuilt.languageCount.toLocaleString()} languages, ${rebuilt.validatedDocuments.toLocaleString()} XML files validated, ${rebuilt.rewrittenDocuments.toLocaleString()} changed XML files rewritten${rebuilt.exact ? "; unchanged ZIP preserved byte-for-byte" : ""}. Corrections: ${correctionSummary(corrections)}.`,
+    exact: rebuilt.exact,
     outputFile,
   };
 }

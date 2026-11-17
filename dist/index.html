@@ -121,7 +121,7 @@
 
     <section class="notes" aria-label="Format notes">
       <div class="note"><strong>Reference-compatible workbook</strong><span>One visible sheet with <code>App</code>, <code>string ID</code>, <code>item ID</code>, and the reference <code>values*</code> columns.</span></div>
-      <div class="note"><strong>Full reverse conversion</strong><span>Every run reads the workbook and rebuilds all translation XML files, even when no cell values changed.</span></div>
+      <div class="note"><strong>Full reverse validation</strong><span>Every run reads and validates all mapped XML resources. Only XML files with verified cell changes are rewritten; an unchanged ZIP is preserved byte-for-byte.</span></div>
       <div class="note"><strong>Safe legacy conversion</strong><span>For an existing consolidated workbook, add its source ZIP so non-translation files and the directory tree are preserved.</span></div>
       <div class="note"><strong>Controlled corrections</strong><span>Apply exact text replacements by language and optionally align translation capitalization with English before export.</span></div>
       <div class="note"><strong>Connected workflow</strong><span>Generated XLSX and ZIP files automatically become the default inputs for the next step and comparison.</span></div>

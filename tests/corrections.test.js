@@ -62,4 +62,26 @@ const repeatedResult = engine.applyRules(keyedMatrix, keyedRules);
 assert.equal(repeatedResult.alreadyApplied, 2);
 assert.equal(repeatedResult.changes.every((change) => change.alreadyApplied), true);
 
+const duplicateResourceMatrix = [
+  ["App", "string ID", "item ID", "values", "values-sk"],
+  ["TunerInput", "shared", null, "ATV text", "staré"],
+  ["TunerInput", "shared", null, "DTV text", "staré"],
+];
+const duplicateRules = engine.parseRules([
+  ["App", "string ID", "item ID", "values", "values-sk (original)", "values-sk (corrected)"],
+  ["TunerInput", "shared", null, "", "staré", "nové"],
+], duplicateResourceMatrix[0].slice(3));
+const duplicateResult = engine.applyRules(duplicateResourceMatrix, duplicateRules);
+assert.equal(duplicateResult.replacements, 2);
+assert.equal(duplicateResourceMatrix[1][4], "nové");
+assert.equal(duplicateResourceMatrix[2][4], "nové");
+assert.equal(duplicateResult.changes.every((change) => change.oldText === "staré" && change.newText === "nové"), true);
+
+const unmatchedResult = engine.applyRules(duplicateResourceMatrix, [{
+  kind: "keyed", language: "values-sk", app: "Missing", id: "missing", item: null,
+  oldText: "old", newText: "new", sourceRow: 9,
+}]);
+assert.equal(unmatchedResult.unmatchedRules, 1);
+assert.equal(unmatchedResult.unmatchedRuleDetails[0].sourceRow, 9);
+
 console.log("correction engine tests passed");

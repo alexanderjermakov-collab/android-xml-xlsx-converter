@@ -137,19 +137,22 @@
     const rowByKey = new Map();
     for (let row = 1; row < matrix.length; row += 1) {
       const values = matrix[row] || [];
-      rowByKey.set(recordKey(values[0], values[1], values[2]), row);
+      const key = recordKey(values[0], values[1], values[2]);
+      if (!rowByKey.has(key)) rowByKey.set(key, []);
+      rowByKey.get(key).push(row);
     }
     const changedCells = new Map();
     let replacements = 0;
     let matchedRules = 0;
     let alreadyApplied = 0;
+    const ruleOutcomes = [];
 
     for (const rule of rules) {
       let ruleMatches = 0;
       if (rule.kind === "keyed") {
         const column = columnByLanguage.get(rule.language);
-        const row = rowByKey.get(recordKey(rule.app, rule.id, rule.item));
-        if (column !== undefined && row !== undefined) {
+        const rows = rowByKey.get(recordKey(rule.app, rule.id, rule.item)) || [];
+        if (column !== undefined) for (const row of rows) {
           const current = text(matrix[row]?.[column]);
           if (current === rule.oldText) {
             matrix[row][column] = rule.newText;
@@ -159,6 +162,8 @@
               value: rule.newText,
               language: rule.language,
               sourceRow: rule.sourceRow,
+              oldText: rule.oldText,
+              newText: rule.newText,
               alreadyApplied: false,
             });
             replacements += 1;
@@ -170,6 +175,8 @@
               value: rule.newText,
               language: rule.language,
               sourceRow: rule.sourceRow,
+              oldText: rule.oldText,
+              newText: rule.newText,
               alreadyApplied: true,
             });
             alreadyApplied += 1;
@@ -189,6 +196,8 @@
               value: rule.newText,
               language,
               sourceRow: rule.sourceRow,
+              oldText: rule.oldText,
+              newText: rule.newText,
               alreadyApplied: false,
             });
             replacements += 1;
@@ -197,8 +206,16 @@
         }
       }
       if (ruleMatches) matchedRules += 1;
+      ruleOutcomes.push({ rule, matches: ruleMatches });
     }
-    return { replacements, matchedRules, unmatchedRules: rules.length - matchedRules, alreadyApplied, changes: [...changedCells.values()] };
+    return {
+      replacements,
+      matchedRules,
+      unmatchedRules: rules.length - matchedRules,
+      unmatchedRuleDetails: ruleOutcomes.filter((outcome) => outcome.matches === 0).map((outcome) => outcome.rule),
+      alreadyApplied,
+      changes: [...changedCells.values()],
+    };
   }
 
   function firstLetter(value) {
