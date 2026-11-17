@@ -29,7 +29,7 @@ Download the template from the application or create a separate XLSX for each la
 | --- | --- | --- | --- | --- | --- |
 | application name | resource identifier | array item or blank | English reference | complete current translation | complete corrected translation |
 
-Replace `xx` in both language columns with the target qualifier, for example `values-cs (original)` and `values-cs (corrected)`. Corrections are matched by `App`, `string ID`, and `item ID`, and the current translation must exactly match the original value. Multiple correction files can be selected in one upload. The earlier `Language`, `Old text`, `New text` layout remains supported for compatibility.
+Replace `xx` in both language columns with the target qualifier, for example `values-cs (original)` and `values-cs (corrected)`. Corrections are matched by `App`, `string ID`, and `item ID`, and the current translation must exactly match the original value. Correction files accumulate across repeated file-picker selections, remain visible with their detected languages, and can be removed individually or cleared together. The earlier `Language`, `Old text`, `New text` layout remains supported for compatibility.
 
 After selecting a ZIP, the converter scans its `values*` folders and displays a searchable language list. All languages are selected by default. Use **All**, **Clear**, or individual checkboxes to control which language columns are included in the consolidated workbook.
 

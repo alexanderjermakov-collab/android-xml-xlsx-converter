@@ -77,9 +77,16 @@
           </div>
           <label class="drop compact-drop" id="correctionDrop">
             <input id="correctionInput" type="file" multiple accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet">
-            <span><strong>Choose one or more correction workbooks</strong>Use a separate correction file for each language</span>
+            <span><strong>Add one or more correction workbooks</strong>Each new selection is added to the existing list</span>
             <span class="filename" id="correctionName"></span>
           </label>
+          <div class="correction-selection" id="correctionSelection" hidden>
+            <div class="correction-selection-heading">
+              <strong id="correctionSelectionCount">0 correction files loaded</strong>
+              <button class="text-button" id="clearCorrectionFiles" type="button">Clear all</button>
+            </div>
+            <div class="correction-file-list" id="correctionFileList"></div>
+          </div>
           <div class="correction-help">Expected columns: <code>App</code>, <code>string ID</code>, <code>item ID</code>, <code>values</code>, <code>values-xx (original)</code>, <code>values-xx (corrected)</code>.</div>
           <label class="check-option">
             <input id="capitalizationRule" type="checkbox">

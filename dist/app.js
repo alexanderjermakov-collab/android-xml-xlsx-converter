@@ -21,6 +21,11 @@ const ui = {
   zipStatus: document.querySelector("#zipStatus"),
   xlsxStatus: document.querySelector("#xlsxStatus"),
   correctionInput: document.querySelector("#correctionInput"),
+  correctionSelection: document.querySelector("#correctionSelection"),
+  correctionSelectionCount: document.querySelector("#correctionSelectionCount"),
+  correctionFileList: document.querySelector("#correctionFileList"),
+  clearCorrectionFiles: document.querySelector("#clearCorrectionFiles"),
+  correctionName: document.querySelector("#correctionName"),
   correctionTemplateButton: document.querySelector("#correctionTemplateButton"),
   capitalizationRule: document.querySelector("#capitalizationRule"),
   correctedXlsxButton: document.querySelector("#correctedXlsxButton"),
@@ -47,6 +52,7 @@ const pipeline = {
   outputZip: null,
   outputModifications: new Map(),
 };
+const correctionFileState = { entries: [] };
 
 function showStatus(node, message, kind = "working") {
   node.textContent = message;
@@ -76,6 +82,103 @@ wireFileInput(ui.referenceInput, "referenceName", "referenceDrop");
 wireFileInput(ui.correctionInput, "correctionName", "correctionDrop");
 wireFileInput(ui.compareSourceInput, "compareSourceName", "compareSourceDrop");
 wireFileInput(ui.compareOutputInput, "compareOutputName", "compareOutputDrop");
+
+function correctionFileKey(file) {
+  return `${file.name}\u001f${file.size}\u001f${file.lastModified}`;
+}
+
+async function inspectCorrectionFile(file) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const workbook = XLSX.read(bytes, { type: "array", cellFormula: false, cellStyles: false });
+  const sheetName = workbook.SheetNames[0];
+  if (!sheetName) throw new Error("No worksheet found");
+  const matrix = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1, raw: true, defval: null });
+  const headers = (matrix[0] || []).map((value) => String(value || ""));
+  const languages = headers.flatMap((header) => {
+    const match = /^\s*(values(?:-[^\s(]+)?)\s*\(original\)\s*$/i.exec(header);
+    return match ? [match[1]] : [];
+  });
+  const legacy = headers.some((header) => header.trim().toLocaleLowerCase() === "language");
+  if (!languages.length && !legacy) throw new Error("Correction language columns not found");
+  const rows = matrix.slice(1).filter((row) => (row || []).some((value) => value !== null && value !== undefined && value !== "")).length;
+  return {
+    label: languages.length ? languages.join(", ") : "languages specified per row",
+    rows,
+  };
+}
+
+function renderCorrectionFiles() {
+  const entries = correctionFileState.entries;
+  ui.correctionSelection.hidden = entries.length === 0;
+  ui.correctionSelectionCount.textContent = `${entries.length.toLocaleString()} correction ${entries.length === 1 ? "file" : "files"} loaded`;
+  ui.correctionName.textContent = entries.length ? `${entries.length} loaded; add more files at any time` : "";
+  ui.correctionFileList.replaceChildren();
+
+  for (const entry of entries) {
+    const item = document.createElement("div");
+    item.className = "correction-file-item";
+    const details = document.createElement("div");
+    const name = document.createElement("strong");
+    name.textContent = entry.file.name;
+    const meta = document.createElement("span");
+    if (entry.error) {
+      meta.className = "error";
+      meta.textContent = entry.error;
+    } else if (entry.info) {
+      meta.textContent = `${entry.info.label} · ${entry.info.rows.toLocaleString()} correction rows`;
+    } else {
+      meta.textContent = "Reading workbook…";
+    }
+    details.append(name, meta);
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "text-button correction-remove";
+    remove.textContent = "Remove";
+    remove.addEventListener("click", () => {
+      correctionFileState.entries = correctionFileState.entries.filter((candidate) => candidate.key !== entry.key);
+      renderCorrectionFiles();
+    });
+    item.append(details, remove);
+    ui.correctionFileList.append(item);
+  }
+}
+
+async function addCorrectionFiles(files) {
+  const known = new Set(correctionFileState.entries.map((entry) => entry.key));
+  const additions = [];
+  for (const file of files) {
+    const key = correctionFileKey(file);
+    if (known.has(key)) continue;
+    known.add(key);
+    const entry = { key, file, info: null, error: "" };
+    correctionFileState.entries.push(entry);
+    additions.push(entry);
+  }
+  renderCorrectionFiles();
+  await Promise.all(additions.map(async (entry) => {
+    try {
+      entry.info = await inspectCorrectionFile(entry.file);
+    } catch (error) {
+      entry.error = error.message || String(error);
+    }
+  }));
+  renderCorrectionFiles();
+}
+
+function selectedCorrectionFiles() {
+  return correctionFileState.entries.map((entry) => entry.file);
+}
+
+ui.correctionInput.addEventListener("change", async () => {
+  const files = Array.from(ui.correctionInput.files || []);
+  ui.correctionInput.value = "";
+  await addCorrectionFiles(files);
+});
+
+ui.clearCorrectionFiles.addEventListener("click", () => {
+  correctionFileState.entries = [];
+  renderCorrectionFiles();
+});
 
 function browserFile(bytes, filename, mime) {
   return new File([bytes], filename, { type: mime, lastModified: Date.now() });
@@ -1005,7 +1108,7 @@ ui.xlsxButton.addEventListener("click", async () => {
     const result = await createArchive(
       file,
       ui.referenceInput.files[0] || null,
-      Array.from(ui.correctionInput.files || []),
+      selectedCorrectionFiles(),
       ui.capitalizationRule.checked,
     );
     showStatus(ui.xlsxStatus, result.message, "success");
@@ -1033,7 +1136,7 @@ ui.correctedXlsxButton.addEventListener("click", async () => {
   try {
     const result = await createCorrectedWorkbook(
       file,
-      Array.from(ui.correctionInput.files || []),
+      selectedCorrectionFiles(),
       ui.capitalizationRule.checked,
     );
     showStatus(ui.xlsxStatus, result.message, "success");
