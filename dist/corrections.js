@@ -221,6 +221,20 @@
   function firstLetter(value) {
     const source = text(value);
     for (let index = 0; index < source.length;) {
+      if (source[index] === "&") {
+        const entity = /^&(?:#[0-9]+|#x[0-9a-f]+|[a-z][a-z0-9]+);/i.exec(source.slice(index));
+        if (entity) {
+          index += entity[0].length;
+          continue;
+        }
+      }
+      if (source[index] === "<") {
+        const tagEnd = source.indexOf(">", index + 1);
+        if (tagEnd >= 0) {
+          index = tagEnd + 1;
+          continue;
+        }
+      }
       const character = String.fromCodePoint(source.codePointAt(index));
       if (/\p{L}/u.test(character)) return { character, index, length: character.length };
       index += character.length;
@@ -269,7 +283,7 @@
     return index >= 0 ? index + 3 : -1;
   }
 
-  function applyCapitalization(matrix) {
+  function applyCapitalization(matrix, excludedCells = new Set()) {
     const headers = (matrix[0] || []).slice(3).map(text);
     const sourceColumn = englishColumn(headers);
     if (sourceColumn < 0) throw new Error("Capitalization rule needs an English column (values or values-en).");
@@ -279,6 +293,7 @@
     for (let row = 1; row < matrix.length; row += 1) {
       if (!isUppercaseStart(matrix[row]?.[sourceColumn])) continue;
       for (let column = 3; column < (matrix[row] || []).length; column += 1) {
+        if (excludedCells.has(`${row}:${column}`)) continue;
         if (column === sourceColumn || matrix[row][column] === null || matrix[row][column] === undefined || matrix[row][column] === "") continue;
         const header = headers[column - 3];
         const updated = uppercaseFirstLetter(matrix[row][column], localeForColumn(header));

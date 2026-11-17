@@ -1,6 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
 const engine = require("../dist/corrections.js");
 
 const corrections = [
@@ -34,6 +35,9 @@ assert.equal(matrix[3][6], "İstanbul");
 assert.equal(matrix[4][4], "malé");
 assert.equal(engine.isUppercaseStart("…Hello"), true);
 assert.equal(engine.uppercaseFirstLetter("(hello)", "en"), "(Hello)");
+assert.equal(engine.uppercaseFirstLetter("&quot;hello&quot;", "en"), "&quot;Hello&quot;");
+assert.equal(engine.uppercaseFirstLetter("&quot;Hello&quot;", "en"), "&quot;Hello&quot;");
+assert.equal(engine.uppercaseFirstLetter("<b>hello</b>", "en"), "<b>Hello</b>");
 
 const keyedMatrix = [
   ["App", "string ID", "item ID", "values", "values-sk", "values-cs"],
@@ -83,5 +87,31 @@ const unmatchedResult = engine.applyRules(duplicateResourceMatrix, [{
 }]);
 assert.equal(unmatchedResult.unmatchedRules, 1);
 assert.equal(unmatchedResult.unmatchedRuleDetails[0].sourceRow, 9);
+
+const priorityMatrix = [
+  ["App", "string ID", "item ID", "values", "values-cs"],
+  ["Calendar", "sunday", null, "Sunday", "Neděle"],
+  ["TunerInput", "quoted", null, "Quoted value", "&quot;Malý text&quot;"],
+];
+const priorityRules = engine.parseRules([
+  ["App", "string ID", "item ID", "values", "values-cs (original)", "values-cs (corrected)"],
+  ["Calendar", "sunday", null, "Sunday", "Neděle", "neděle"],
+  ["TunerInput", "quoted", null, "Quoted value", "&quot;Malý text&quot;", "&quot;opravený text&quot;"],
+], priorityMatrix[0].slice(3));
+const priorityResult = engine.applyRules(priorityMatrix, priorityRules);
+engine.applyCapitalization(priorityMatrix, new Set(priorityResult.changes.map((change) => `${change.row}:${change.column}`)));
+assert.equal(priorityResult.unmatchedRules, 0);
+assert.equal(priorityMatrix[1][4], "neděle");
+assert.equal(priorityMatrix[2][4], "&quot;opravený text&quot;");
+const repeatedPriorityResult = engine.applyRules(priorityMatrix, priorityRules);
+engine.applyCapitalization(priorityMatrix, new Set(repeatedPriorityResult.changes.map((change) => `${change.row}:${change.column}`)));
+assert.equal(repeatedPriorityResult.unmatchedRules, 0);
+assert.equal(priorityMatrix[1][4], "neděle");
+assert.equal(priorityMatrix[2][4], "&quot;opravený text&quot;");
+
+const appSource = fs.readFileSync(require.resolve("../dist/app.js"), "utf8");
+const pipelineSource = appSource.slice(appSource.indexOf("async function applyCorrectionOptions"), appSource.indexOf("function legacyModificationKey"));
+assert.ok(pipelineSource.includes("CorrectionEngine.applyCapitalization(matrix, correctionCells)"));
+assert.ok(pipelineSource.indexOf("for (const correctionFile") < pipelineSource.indexOf("CorrectionEngine.applyCapitalization(matrix, correctionCells)"));
 
 console.log("correction engine tests passed");

@@ -1115,6 +1115,7 @@ async function applyCorrectionOptions(matrix, correctionFiles, capitalizationEna
     const key = `${change.row}:${change.column}`;
     const existing = changes.get(key);
     const reasons = new Set(existing?.reasons || []);
+    if (correctionCheck) reasons.delete("Capitalization");
     reasons.add(reason);
     const correctionChecks = [...(existing?.correctionChecks || [])];
     if (correctionCheck && !correctionChecks.some((check) =>
@@ -1130,6 +1131,7 @@ async function applyCorrectionOptions(matrix, correctionFiles, capitalizationEna
   let alreadyApplied = 0;
   let capitalized = 0;
   const unmatchedChecks = [];
+  const correctionCells = new Set();
 
   for (const correctionFile of correctionFiles) {
     let rules;
@@ -1144,6 +1146,7 @@ async function applyCorrectionOptions(matrix, correctionFiles, capitalizationEna
     unmatchedRules += result.unmatchedRules;
     alreadyApplied += result.alreadyApplied || 0;
     result.changes.forEach((change) => {
+      correctionCells.add(`${change.row}:${change.column}`);
       const language = change.language || headers[change.column - 3];
       addChange(
         change,
@@ -1172,11 +1175,13 @@ async function applyCorrectionOptions(matrix, correctionFiles, capitalizationEna
       });
     }
   }
+  // Explicit correction workbooks have final authority. Their target cells are
+  // excluded from the general capitalization rule, including on repeated runs.
   if (capitalizationEnabled) {
-    const result = CorrectionEngine.applyCapitalization(matrix);
-    capitalized = result.capitalized;
+    const result = CorrectionEngine.applyCapitalization(matrix, correctionCells);
     result.changes.forEach((change) => addChange(change, "Capitalization"));
   }
+  capitalized = [...changes.values()].filter((change) => change.reasons?.includes("Capitalization")).length;
   return {
     files: correctionFiles.length,
     replacements,
