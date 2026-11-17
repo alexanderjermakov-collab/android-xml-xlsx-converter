@@ -1,4 +1,4 @@
-/* global JSZip, XLSX, CorrectionEngine */
+/* global JSZip, XLSX, CorrectionEngine, DiffEngine */
 "use strict";
 
 const ROUNDTRIP_SHEET = "_RoundTrip";
@@ -24,6 +24,10 @@ const ui = {
   correctionTemplateButton: document.querySelector("#correctionTemplateButton"),
   capitalizationRule: document.querySelector("#capitalizationRule"),
   correctedXlsxButton: document.querySelector("#correctedXlsxButton"),
+  compareSourceInput: document.querySelector("#compareSourceInput"),
+  compareOutputInput: document.querySelector("#compareOutputInput"),
+  compareButton: document.querySelector("#compareButton"),
+  compareStatus: document.querySelector("#compareStatus"),
   languagePanel: document.querySelector("#languagePanel"),
   languageList: document.querySelector("#languageList"),
   languageCount: document.querySelector("#languageCount"),
@@ -60,6 +64,8 @@ wireFileInput(ui.zipInput, "zipName", "zipDrop");
 wireFileInput(ui.xlsxInput, "xlsxName", "xlsxDrop");
 wireFileInput(ui.referenceInput, "referenceName", "referenceDrop");
 wireFileInput(ui.correctionInput, "correctionName", "correctionDrop");
+wireFileInput(ui.compareSourceInput, "compareSourceName", "compareSourceDrop");
+wireFileInput(ui.compareOutputInput, "compareOutputName", "compareOutputDrop");
 
 function downloadBytes(bytes, filename, mime) {
   const blob = new Blob([bytes], { type: mime });
@@ -315,6 +321,140 @@ async function extractArchive(zipBytes, selectedColumns, onProgress) {
     }
   }
   return { groups, discoveredColumns, processedFiles: entries.length };
+}
+
+function archiveRecordKey(xmlPath, resourceType, id, item) {
+  return JSON.stringify([xmlPath, resourceType, id, item === null || item === undefined ? null : String(item)]);
+}
+
+async function archiveRecords(file, label, onProgress) {
+  const zip = await JSZip.loadAsync(new Uint8Array(await file.arrayBuffer()));
+  const entries = Object.values(zip.files).filter((entry) => !entry.dir && parseResourcePath(entry.name));
+  const records = new Map();
+
+  for (let entryIndex = 0; entryIndex < entries.length; entryIndex += 1) {
+    const entry = entries[entryIndex];
+    const info = parseResourcePath(entry.name);
+    const documentNode = xmlDocument(await entry.async("string"), entry.name);
+    const resources = documentNode.documentElement;
+    for (const element of Array.from(resources.children)) {
+      const id = element.getAttribute("name");
+      if (!id) continue;
+      const isArrayFile = info.filename === "arrays.xml" || info.filename === "strings.xml";
+      if (element.localName === "string-array" && isArrayFile) {
+        directChildren(element, "item").forEach((item, itemIndex) => {
+          const key = archiveRecordKey(entry.name, "string-array", id, itemIndex);
+          records.set(key, {
+            app: info.app,
+            language: info.column,
+            xmlPath: entry.name,
+            filename: info.filename,
+            resourceType: "string-array",
+            id,
+            item: itemIndex,
+            value: item.textContent || "",
+          });
+        });
+      } else if (
+        element.localName === "string" &&
+        (info.filename.startsWith("strings") || info.filename.endsWith("strings.xml"))
+      ) {
+        const key = archiveRecordKey(entry.name, "string", id, null);
+        records.set(key, {
+          app: info.app,
+          language: info.column,
+          xmlPath: entry.name,
+          filename: info.filename,
+          resourceType: "string",
+          id,
+          item: null,
+          value: element.textContent || "",
+        });
+      }
+    }
+    if (entryIndex % 25 === 0) {
+      onProgress?.(`Reading ${label} XML files… ${entryIndex + 1} / ${entries.length}`);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  }
+  return { records, xmlFiles: entries.length };
+}
+
+function diffWorkbook(sourceFile, outputFile, sourceArchive, outputArchive, result) {
+  const workbook = XLSX.utils.book_new();
+  const matchRate = result.total ? result.matched / result.total : 1;
+  const summaryRows = [
+    ["ZIP translation comparison", null],
+    ["Source ZIP", sourceFile.name],
+    ["Output ZIP", outputFile.name],
+    ["Generated", new Date().toLocaleString()],
+    [null, null],
+    ["Metric", "Count"],
+    ["Total translation rows", result.total],
+    ["Matching rows", result.matched],
+    ["Different rows", result.different],
+    ["Changed values", result.changed],
+    ["Only in source", result.onlySource],
+    ["Only in output", result.onlyOutput],
+    ["Match rate", matchRate],
+    ["Source translation rows", sourceArchive.records.size],
+    ["Output translation rows", outputArchive.records.size],
+    ["Source translation XML files", sourceArchive.xmlFiles],
+    ["Output translation XML files", outputArchive.xmlFiles],
+  ];
+  const summarySheet = XLSX.utils.aoa_to_sheet(summaryRows);
+  summarySheet["!cols"] = [{ wch: 34 }, { wch: 72 }];
+  if (summarySheet.B13) summarySheet.B13.z = "0.0%";
+  XLSX.utils.book_append_sheet(workbook, summarySheet, "Summary");
+
+  const differenceRows = [[
+    "Status",
+    "App",
+    "Language",
+    "XML path",
+    "XML file",
+    "Resource type",
+    "string ID",
+    "item ID",
+    "Source value",
+    "Output value",
+  ]];
+  result.differences.forEach((row) => differenceRows.push([
+    row.status,
+    row.app,
+    row.language,
+    row.xmlPath,
+    row.filename,
+    row.resourceType,
+    row.id,
+    row.item,
+    row.sourceValue,
+    row.outputValue,
+  ]));
+  const differencesSheet = XLSX.utils.aoa_to_sheet(differenceRows);
+  differencesSheet["!cols"] = [
+    { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 64 }, { wch: 20 },
+    { wch: 16 }, { wch: 40 }, { wch: 12 }, { wch: 64 }, { wch: 64 },
+  ];
+  if (differenceRows.length > 1) differencesSheet["!autofilter"] = { ref: `A1:J${differenceRows.length}` };
+  XLSX.utils.book_append_sheet(workbook, differencesSheet, "Differences");
+  return workbook;
+}
+
+async function compareArchives(sourceFile, outputFile) {
+  const sourceArchive = await archiveRecords(sourceFile, "source", (message) => showStatus(ui.compareStatus, message));
+  const outputArchive = await archiveRecords(outputFile, "output", (message) => showStatus(ui.compareStatus, message));
+  const result = DiffEngine.compare(sourceArchive.records, outputArchive.records);
+  const workbook = diffWorkbook(sourceFile, outputFile, sourceArchive, outputArchive, result);
+  const workbookBytes = new Uint8Array(XLSX.write(workbook, { bookType: "xlsx", type: "array", compression: true }));
+  const sourceStem = sourceFile.name.replace(/\.[^.]+$/, "");
+  const outputStem = outputFile.name.replace(/\.[^.]+$/, "");
+  downloadBytes(
+    workbookBytes,
+    `${sourceStem}_vs_${outputStem}_differences.xlsx`,
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  );
+  return result;
 }
 
 function flattenGroups(groups) {
@@ -799,5 +939,29 @@ ui.correctedXlsxButton.addEventListener("click", async () => {
     showStatus(ui.xlsxStatus, error.message || String(error), "error");
   } finally {
     setBusy(ui.correctedXlsxButton, false);
+  }
+});
+
+ui.compareButton.addEventListener("click", async () => {
+  const sourceFile = ui.compareSourceInput.files[0];
+  const outputFile = ui.compareOutputInput.files[0];
+  if (!sourceFile || !outputFile) {
+    showStatus(ui.compareStatus, "Choose both the source ZIP and output ZIP.", "error");
+    return;
+  }
+  setBusy(ui.compareButton, true);
+  showStatus(ui.compareStatus, "Opening archives…");
+  try {
+    const result = await compareArchives(sourceFile, outputFile);
+    showStatus(
+      ui.compareStatus,
+      `Compared ${result.total.toLocaleString()} translation rows: ${result.matched.toLocaleString()} match, ${result.different.toLocaleString()} differ. XLSX report downloaded.`,
+      "success",
+    );
+  } catch (error) {
+    console.error(error);
+    showStatus(ui.compareStatus, error.message || String(error), "error");
+  } finally {
+    setBusy(ui.compareButton, false);
   }
 });
